@@ -1,28 +1,22 @@
 """
-STADIUM ROUTING SERVICE 
-Modular architecture with hazard-aware A* pathfinding
+ROUTING SERVICE - Main Application
+Responsible for calculating routes
 """
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, List
 import httpx
 import asyncio
 
-from astar import Graph, HazardMap
-from nearest_responder import StaffTracker, create_mock_staff_tracker
-from api_handlers import (
-    RouteAPIHandler, EmergencyAPIHandler, HazardAPIHandler,
-    RouteRequest, MultiDestinationRequest, NearestRequest,
-    EmergencyRequest, HazardUpdate
-)
-
+from astar import Graph, HazardMap, hazard_aware_astar, find_nearest_node, multi_destination_route
+from api_handlers import RouteAPIHandler, HazardAPIHandler
 
 # ========== FASTAPI APP ==========
 
 app = FastAPI(
-    title="Stadium Routing Service v2.0",
-    description="Hazard-aware A* pathfinding with emergency response",
+    title="Stadium Routing Service",
+    description="Hazard-aware pathfinding with A* algorithm",
     version="2.0.0"
 )
 
@@ -34,18 +28,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ========== GLOBAL STATE ==========
+# ========== CONFIGURATION ==========
 
 MAP_SERVICE_URL = "http://localhost:8000"
 
+# ========== GLOBAL STATE ==========
+
 GRAPH: Optional[Graph] = None
 HAZARD_MAP: Optional[HazardMap] = None
-STAFF_TRACKER: Optional[StaffTracker] = None
 
-# API Handlers
+# API Handlers (only routing and hazards)
 route_handler: Optional[RouteAPIHandler] = None
-emergency_handler: Optional[EmergencyAPIHandler] = None
 hazard_handler: Optional[HazardAPIHandler] = None
 
 
@@ -54,11 +47,10 @@ hazard_handler: Optional[HazardAPIHandler] = None
 @app.on_event("startup")
 async def startup():
     """Initialize routing service"""
-    global GRAPH, HAZARD_MAP, STAFF_TRACKER
-    global route_handler, emergency_handler, hazard_handler
+    global GRAPH, HAZARD_MAP, route_handler, hazard_handler
     
     print("\n" + "="*60)
-    print("🚀 STADIUM ROUTING SERVICE v2.0 - STARTING")
+    print("🚀 ROUTING SERVICE v2.0 - STARTING")
     print("="*60)
     
     # Initialize hazard map
@@ -69,21 +61,15 @@ async def startup():
     success = await load_graph_from_map_service()
     
     if success and GRAPH:
-        # Initialize staff tracker
-        STAFF_TRACKER = create_mock_staff_tracker(GRAPH, num_per_role=3)
-        print(f"✅ Staff tracker initialized with {len(STAFF_TRACKER.staff)} staff members")
-        
-        # Initialize API handlers
+        # Initialize API handlers (ONLY route and hazard)
         route_handler = RouteAPIHandler(GRAPH, HAZARD_MAP)
-        emergency_handler = EmergencyAPIHandler(GRAPH, HAZARD_MAP, STAFF_TRACKER)
         hazard_handler = HazardAPIHandler(HAZARD_MAP)
         print("✅ API handlers initialized")
         
         print("\n" + "="*60)
         print("✅ ROUTING SERVICE READY")
         print(f"   - Nodes: {len(GRAPH.nodes)}")
-        print(f"   - Edges: {len(GRAPH.adjacency)}")
-        print(f"   - Staff: {len(STAFF_TRACKER.staff)}")
+        print(f"   - Edges: {sum(len(v) for v in GRAPH.adjacency.values())}")
         print(f"   - Map Service: {MAP_SERVICE_URL}")
         print("="*60 + "\n")
     else:
@@ -115,7 +101,6 @@ async def load_graph_from_map_service():
             if closures:
                 for closure in closures:
                     if closure.get('edge_id'):
-                        # Find edge by ID
                         edge = next((e for e in edges if e['id'] == closure['edge_id']), None)
                         if edge:
                             HAZARD_MAP.add_closure(edge['from'], edge['to'])
@@ -134,11 +119,10 @@ async def load_graph_from_map_service():
 async def root():
     """Health check"""
     return {
-        "service": "Stadium Routing Service",
+        "service": "Routing Service",
         "version": "2.0.0",
         "status": "running" if GRAPH else "no_graph_loaded",
         "nodes": len(GRAPH.nodes) if GRAPH else 0,
-        "staff": len(STAFF_TRACKER.staff) if STAFF_TRACKER else 0,
         "closures": len(HAZARD_MAP.closures) // 2 if HAZARD_MAP else 0,
         "map_service": MAP_SERVICE_URL
     }
@@ -164,10 +148,6 @@ async def health():
             "closures": len(HAZARD_MAP.closures) // 2,
             "node_hazards": len(HAZARD_MAP.node_hazards),
             "edge_hazards": len(HAZARD_MAP.edge_hazards) // 2
-        },
-        "staff": {
-            "total": len(STAFF_TRACKER.staff),
-            "available": sum(1 for s in STAFF_TRACKER.staff.values() if s.is_available())
         }
     }
 
@@ -181,19 +161,16 @@ async def reload_graph():
         raise HTTPException(status_code=503, detail="Failed to reload graph from Map Service")
     
     # Reinitialize handlers
-    global route_handler, emergency_handler, hazard_handler, STAFF_TRACKER
+    global route_handler, hazard_handler
     
     if GRAPH and HAZARD_MAP:
-        STAFF_TRACKER = create_mock_staff_tracker(GRAPH, num_per_role=3)
         route_handler = RouteAPIHandler(GRAPH, HAZARD_MAP)
-        emergency_handler = EmergencyAPIHandler(GRAPH, HAZARD_MAP, STAFF_TRACKER)
         hazard_handler = HazardAPIHandler(HAZARD_MAP)
     
     return {
         "status": "success",
         "nodes": len(GRAPH.nodes),
-        "edges": len(GRAPH.adjacency),
-        "staff": len(STAFF_TRACKER.staff)
+        "edges": sum(len(v) for v in GRAPH.adjacency.values())
     }
 
 
@@ -215,6 +192,8 @@ async def get_route(
         if not GRAPH:
             raise HTTPException(status_code=503, detail="Graph not loaded")
     
+    from api_handlers import RouteRequest
+    
     request = RouteRequest(
         from_node=from_node,
         to_node=to_node,
@@ -225,43 +204,47 @@ async def get_route(
 
 
 @app.post("/api/route/multi")
-async def multi_destination_route(request: MultiDestinationRequest):
+async def multi_destination_route(from_node: str = Query(...), to_nodes: List[str] = Query(...)):
     """
     Calculate route visiting multiple destinations
     
-    Use case: Cleaning staff visiting multiple full bins
-    
-    Body: {
-        "start": "N1",
-        "destinations": ["N5", "N10", "N15"]
-    }
+    Example: POST /api/route/multi?from_node=N1&to_nodes=N5&to_nodes=N10
     """
     if not GRAPH:
         await load_graph_from_map_service()
+    
+    from api_handlers import MultiDestinationRequest
+    
+    request = MultiDestinationRequest(
+        start=from_node,
+        destinations=to_nodes
+    )
     
     return route_handler.get_multi_destination_route(request)
 
 
 @app.post("/api/route/nearest")
-async def find_nearest(request: NearestRequest):
+async def find_nearest(target: str = Query(...), candidates: List[str] = Query(...)):
     """
     Find nearest node from a list of candidates
     
-    Body: {
-        "target": "N42",
-        "candidates": ["N10", "N15", "N20"]
-    }
+    Example: POST /api/route/nearest?target=N42&candidates=N10&candidates=N15
     """
     if not GRAPH:
         await load_graph_from_map_service()
+    
+    from api_handlers import NearestRequest
+    
+    request = NearestRequest(
+        target=target,
+        candidates=candidates
+    )
     
     return route_handler.find_nearest_node_handler(request)
 
 
 @app.get("/api/route/evacuation")
-async def evacuation_route(
-    from_node: str = Query(..., description="Current position")
-):
+async def evacuation_route(from_node: str = Query(..., description="Current position")):
     """
     Find safest evacuation route to nearest exit
     
@@ -270,7 +253,7 @@ async def evacuation_route(
     if not GRAPH:
         await load_graph_from_map_service()
     
-    # Get gates as exit nodes
+    # Get gates as exit nodes from Map Service
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{MAP_SERVICE_URL}/api/gates", timeout=5)
@@ -283,89 +266,25 @@ async def evacuation_route(
                 closest = None
                 for node_id, node in GRAPH.nodes.items():
                     dist = ((node.x - gate['x'])**2 + (node.y - gate['y'])**2)**0.5
-                    if dist < min_dist and dist < 20.0:  # Within 20m of gate
+                    if dist < min_dist and dist < 20.0:
                         min_dist = dist
                         closest = node_id
                 if closest and closest not in exit_nodes:
                     exit_nodes.append(closest)
             
-            # If no gates found, use edge nodes (N1, N21)
             if not exit_nodes:
                 exit_nodes = ['N1', 'N21']
             
         except:
-            # Fallback: use entrance/exit nodes
             exit_nodes = ['N1', 'N21', 'N20']
     
     return route_handler.get_evacuation_route(from_node, exit_nodes)
 
 
-# ========== EMERGENCY RESPONSE ==========
-
-@app.post("/api/emergency/assign")
-async def assign_responder(request: EmergencyRequest):
-    """
-    Find and assign nearest available responder
-    
-    Body: {
-        "location": "N42",
-        "incident_type": "medical",
-        "priority": "high",
-        "required_role": "security"
-    }
-    """
-    if not GRAPH:
-        await load_graph_from_map_service()
-    
-    return emergency_handler.assign_nearest_responder(request)
-
-
-@app.get("/api/emergency/nearest")
-async def find_nearest_responder_simple(
-    location: str = Query(..., description="Emergency location node ID"),
-    role: str = Query(..., description="Staff role: security, cleaning, medical, supervisor")
-):
-    """
-    Find nearest available staff member (simplified endpoint)
-    
-    Example: /api/emergency/nearest?location=N42&role=security
-    """
-    if not GRAPH:
-        await load_graph_from_map_service()
-    
-    request = EmergencyRequest(
-        location=location,
-        incident_type="generic",
-        priority="high",
-        required_role=role
-    )
-    
-    return emergency_handler.assign_nearest_responder(request)
-
-
-@app.post("/api/emergency/assign_multiple")
-async def assign_multiple_responders(
-    request: EmergencyRequest,
-    num_responders: int = Query(3, description="Number of responders")
-):
-    """
-    Assign multiple responders for large emergency
-    
-    Use case: Fire alarm requires 3+ security staff
-    """
-    if not GRAPH:
-        await load_graph_from_map_service()
-    
-    return emergency_handler.assign_multiple_responders(request, num_responders)
-
-
 # ========== HAZARD MANAGEMENT ==========
 
 @app.post("/api/hazards/closure")
-async def add_closure(
-    from_node: str = Query(...),
-    to_node: str = Query(...)
-):
+async def add_closure(from_node: str = Query(...), to_node: str = Query(...)):
     """
     Add corridor closure (e.g., during evacuation)
     
@@ -375,49 +294,38 @@ async def add_closure(
 
 
 @app.delete("/api/hazards/closure")
-async def remove_closure(
-    from_node: str = Query(...),
-    to_node: str = Query(...)
-):
-    """
-    Remove corridor closure
-    """
+async def remove_closure(from_node: str = Query(...), to_node: str = Query(...)):
+    """Remove corridor closure"""
     return hazard_handler.remove_closure(from_node, to_node)
 
 
 @app.post("/api/hazards/update")
-async def update_hazard(update: HazardUpdate):
+async def update_hazard(node_id: str = Query(...), hazard_type: str = Query(...), severity: float = Query(1.0)):
     """
     Update hazard penalty for a node
     
-    Body: {
-        "node_id": "N42",
-        "hazard_type": "smoke",  // smoke, crowd, fire, spill, structural
-        "severity": 0.8  // 0.0-1.0
-    }
+    Example: POST /api/hazards/update?node_id=N42&hazard_type=smoke&severity=0.8
     
-    Penalties:
-    - smoke: +5 per severity
-    - crowd: +3 per severity
-    - fire: +10 per severity
-    - spill: +2 per severity
-    - structural: +8 per severity
+    Hazard types: smoke, crowd, fire, spill, structural
     """
+    from api_handlers import HazardUpdate
+    
+    update = HazardUpdate(
+        node_id=node_id,
+        hazard_type=hazard_type,
+        severity=severity
+    )
+    
     return hazard_handler.update_hazard(update)
 
 
 @app.post("/api/hazards/crowd")
 async def update_crowd(
     node_id: str = Query(...),
-    occupancy_rate: float = Query(..., ge=0, le=100, description="Occupancy rate 0-100%")
+    occupancy_rate: float = Query(..., ge=0, le=100)
 ):
     """
     Update crowd penalty based on occupancy rate
-    
-    Automatically calculates severity:
-    - 0-50%: no penalty
-    - 50-80%: partial penalty
-    - 80-100%: full penalty
     
     Example: POST /api/hazards/crowd?node_id=N42&occupancy_rate=85
     """

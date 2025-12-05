@@ -1,8 +1,7 @@
 """
-API HANDLERS - FastAPI Route Handlers
-Separates business logic from API layer
+API HANDLERS - Routing Service
+Handles routing requests
 """
-# NOTE: EMERGENCIES incident_type? 
 
 from typing import List, Optional, Dict
 from fastapi import HTTPException
@@ -12,12 +11,7 @@ from astar import (
     Graph, HazardMap, HazardType,
     hazard_aware_astar, find_nearest_node,
     multi_destination_route, find_evacuation_route,
-    calculate_eta, calculate_eta_with_role
-)
-from nearest_responder import (
-    StaffTracker, EmergencyIncident, StaffRole,
-    find_nearest_responder, find_multiple_responders,
-    assign_responder_to_incident
+    calculate_eta
 )
 
 
@@ -46,32 +40,13 @@ class NearestRequest(BaseModel):
     candidates: List[str]
 
 
-class EmergencyRequest(BaseModel):
-    location: str
-    incident_type: str  # "medical", "fire", "fight", etc.
-    priority: str = "high"  # "low", "medium", "high", "critical"
-    required_role: str = "security"  # "security", "medical", "cleaning"
-
-
-class ResponderResponse(BaseModel):
-    staff_id: str
-    role: str
-    current_position: str
-    incident_location: str
-    path: List[str]
-    distance: float
-    eta_seconds: int
-    priority: str
-    waypoints: List[Dict]
-
-
 class HazardUpdate(BaseModel):
     node_id: str
     hazard_type: str  # "smoke", "crowd", "fire", "spill", "structural"
     severity: float = 1.0  # 0.0-1.0
 
 
-# ========== API HANDLERS ==========
+# ========== ROUTE API HANDLER ==========
 
 class RouteAPIHandler:
     """Handles all routing-related API requests"""
@@ -81,9 +56,8 @@ class RouteAPIHandler:
         self.hazard_map = hazard_map
     
     def get_route(self, request: RouteRequest) -> RouteResponse:
-        """
-        Calculate shortest path between two nodes
-        """
+        """Calculate shortest path between two nodes"""
+        
         # Validate nodes exist
         if request.from_node not in self.graph.nodes:
             raise HTTPException(
@@ -123,9 +97,8 @@ class RouteAPIHandler:
         )
     
     def get_multi_destination_route(self, request: MultiDestinationRequest) -> RouteResponse:
-        """
-        Calculate route visiting multiple destinations
-        """
+        """Calculate route visiting multiple destinations"""
+        
         # Validate nodes
         if request.start not in self.graph.nodes:
             raise HTTPException(status_code=404, detail=f"Start node {request.start} not found")
@@ -155,9 +128,8 @@ class RouteAPIHandler:
         )
     
     def find_nearest_node_handler(self, request: NearestRequest) -> RouteResponse:
-        """
-        Find nearest node from a list of candidates
-        """
+        """Find nearest node from a list of candidates"""
+        
         # Validate target
         if request.target not in self.graph.nodes:
             raise HTTPException(status_code=404, detail=f"Target {request.target} not found")
@@ -188,9 +160,8 @@ class RouteAPIHandler:
         )
     
     def get_evacuation_route(self, from_node: str, exit_nodes: List[str]) -> RouteResponse:
-        """
-        Find safest evacuation route
-        """
+        """Find safest evacuation route"""
+        
         if from_node not in self.graph.nodes:
             raise HTTPException(status_code=404, detail=f"Node {from_node} not found")
         
@@ -228,131 +199,7 @@ class RouteAPIHandler:
         return waypoints
 
 
-class EmergencyAPIHandler:
-    """Handles emergency response API requests"""
-    
-    def __init__(self, graph: Graph, hazard_map: HazardMap, staff_tracker: StaffTracker):
-        self.graph = graph
-        self.hazard_map = hazard_map
-        self.staff_tracker = staff_tracker
-    
-    def assign_nearest_responder(self, request: EmergencyRequest) -> ResponderResponse:
-        """
-        Find and assign nearest available responder
-        """
-        # Validate location
-        if request.location not in self.graph.nodes:
-            raise HTTPException(status_code=404, detail=f"Location {request.location} not found")
-        
-        # Parse role
-        try:
-            role = StaffRole(request.required_role.lower())
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid role: {request.required_role}")
-        
-        # Create incident
-        incident = EmergencyIncident(
-            id=f"INC-{hash(request.location) % 10000:04d}",
-            location=request.location,
-            type=request.incident_type,
-            priority=request.priority,
-            required_role=role,
-            timestamp=""  # Would be set in production
-        )
-        
-        # Find responder
-        assignment = assign_responder_to_incident(
-            self.graph,
-            incident,
-            self.staff_tracker,
-            self.hazard_map
-        )
-        
-        if not assignment:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No available {request.required_role} staff found"
-            )
-        
-        # Build waypoints
-        waypoints = []
-        for node_id in assignment.path:
-            node = self.graph.nodes[node_id]
-            waypoints.append({
-                "node_id": node_id,
-                "x": node.x,
-                "y": node.y
-            })
-        
-        return ResponderResponse(
-            staff_id=assignment.staff_id,
-            role=assignment.staff_role.value,
-            current_position=assignment.current_position,
-            incident_location=assignment.incident_location,
-            path=assignment.path,
-            distance=round(assignment.distance, 2),
-            eta_seconds=assignment.eta_seconds,
-            priority=assignment.priority,
-            waypoints=waypoints
-        )
-    
-    def assign_multiple_responders(
-        self,
-        request: EmergencyRequest,
-        num_responders: int = 3
-    ) -> List[ResponderResponse]:
-        """
-        Assign multiple responders for large emergency
-        """
-        if request.location not in self.graph.nodes:
-            raise HTTPException(status_code=404, detail=f"Location {request.location} not found")
-        
-        try:
-            role = StaffRole(request.required_role.lower())
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid role: {request.required_role}")
-        
-        incident = EmergencyIncident(
-            id=f"INC-{hash(request.location) % 10000:04d}",
-            location=request.location,
-            type=request.incident_type,
-            priority=request.priority,
-            required_role=role,
-            timestamp=""
-        )
-        
-        assignments = find_multiple_responders(
-            self.graph,
-            incident,
-            self.staff_tracker,
-            self.hazard_map,
-            num_responders
-        )
-        
-        if not assignments:
-            raise HTTPException(status_code=404, detail="No available responders")
-        
-        responses = []
-        for assignment in assignments:
-            waypoints = []
-            for node_id in assignment.path:
-                node = self.graph.nodes[node_id]
-                waypoints.append({"node_id": node_id, "x": node.x, "y": node.y})
-            
-            responses.append(ResponderResponse(
-                staff_id=assignment.staff_id,
-                role=assignment.staff_role.value,
-                current_position=assignment.current_position,
-                incident_location=assignment.incident_location,
-                path=assignment.path,
-                distance=round(assignment.distance, 2),
-                eta_seconds=assignment.eta_seconds,
-                priority=assignment.priority,
-                waypoints=waypoints
-            ))
-        
-        return responses
-
+# ========== HAZARD API HANDLER ==========
 
 class HazardAPIHandler:
     """Handles hazard management API requests"""
@@ -381,6 +228,7 @@ class HazardAPIHandler:
     
     def update_hazard(self, update: HazardUpdate):
         """Update hazard penalty for a node"""
+        
         # Parse hazard type
         hazard_type_map = {
             "smoke": HazardType.SMOKE,
@@ -409,12 +257,9 @@ class HazardAPIHandler:
         }
     
     def update_crowd_penalty(self, node_id: str, occupancy_rate: float):
-        """
-        Update crowd penalty based on occupancy rate
-        Automatically calculates severity from occupancy (0-100%)
-        """
-        self.hazard_map.set_crowd_penalty(node_id, occupancy_rate)
+        """Update crowd penalty based on occupancy rate"""
         
+        self.hazard_map.set_crowd_penalty(node_id, occupancy_rate)
         penalty = self.hazard_map.get_node_penalty(node_id)
         
         return {

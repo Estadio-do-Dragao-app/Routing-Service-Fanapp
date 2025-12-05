@@ -322,7 +322,7 @@ def find_nearest_node(
     best_distance = float('inf')
     
     for candidate in candidates:
-        path, distance = hazard_aware_astar(graph, candidate, target, hazard_map)
+        path, distance = hazard_aware_astar(graph, target, candidate, hazard_map)
         
         if path and distance < best_distance:
             best_candidate = candidate
