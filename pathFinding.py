@@ -16,33 +16,53 @@ class PathFinder:
         Initialize with static map data.
         Builds internal structures for fast lookups.
         """
-        self.nodes = {n['id']: n for n in map_data.get('nodes', [])}
+        # Robust Node Loading
+        self.nodes = {}
+        for n in map_data.get('nodes', []):
+            nid = n.get('id', n.get('node_id'))
+            if nid:
+                self.nodes[nid] = n
+
         self.edges = map_data.get('edges', [])
         self.closures = map_data.get('closures', [])
         
         # Pre-process edges for adjacency (static part)
         self.graph: Dict[str, List[Tuple[str, float]]] = {}
-        closure_edge_ids = {c.get('edge_id') for c in self.closures if c.get('edge_id')}
+        
+        # Robust Closure Loading
+        closure_edge_ids = set()
+        for c in self.closures:
+            eid = c.get('edge_id', c.get('id'))
+            if eid:
+                closure_edge_ids.add(eid)
         
         for edge in self.edges:
-            if edge['id'] in closure_edge_ids:
+            eid = edge.get('id', edge.get('edge_id'))
+            if eid and eid in closure_edge_ids:
                 continue
             
-            if edge['from'] not in self.graph:
-                self.graph[edge['from']] = []
+            u = edge.get('from', edge.get('source'))
+            v = edge.get('to', edge.get('target'))
+            w = edge.get('w', edge.get('weight', 1.0))
+
+            if not u or not v:
+                continue
+            
+            if u not in self.graph:
+                self.graph[u] = []
             
             # Store base weight, congestion will be applied dynamically
-            self.graph[edge['from']].append((edge['to'], edge['w']))
+            self.graph[u].append((v, float(w)))
 
     @staticmethod
     async def fetch_map_data(client: httpx.AsyncClient, service_url: str):
-        response = await client.get(f"{service_url}/map/data")
+        response = await client.get(f"{service_url}/api/map")
         response.raise_for_status()
         return response.json()
 
     @staticmethod
     async def fetch_congestion_data(client: httpx.AsyncClient, service_url: str):
-        response = await client.get(f"{service_url}/congestion/data")
+        response = await client.get(f"{service_url}/heatmap/stadium/cells")
         response.raise_for_status()
         return response.json()
 
@@ -73,7 +93,11 @@ class PathFinder:
         """Pre-process congestion data into a hash map for O(1) access"""
         if not congestion_data or not congestion_data.get('cells'):
             return {}
-        return {cell['id']: cell['congestion_level'] for cell in congestion_data['cells']}
+        # Support 'cell_id' (new API) or 'id' (legacy/mock)
+        return {
+            cell.get('cell_id', cell.get('id')): cell['congestion_level'] 
+            for cell in congestion_data['cells']
+        }
 
     def find_path(
         self, 

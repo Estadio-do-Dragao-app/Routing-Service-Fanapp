@@ -174,7 +174,7 @@ async def calculate_route(request: RouteRequest):
             ))
         
         # Calculate average congestion
-        congestion_map = {c['id']: c['congestion_level'] for c in congestion_data.get('cells', [])}
+        congestion_map = {c.get('cell_id', c.get('id')): c['congestion_level'] for c in congestion_data.get('cells', [])}
         avg_congestion = sum(congestion_map.get(nid, 0.0) for nid in path_ids) / len(path_ids) if path_ids else 1.0
         # Normalize: Base is 0.0 in map but logic uses 0.0-1.0
         # If map returns 0.0-1.0 directly:
