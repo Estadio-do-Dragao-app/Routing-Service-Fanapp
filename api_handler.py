@@ -102,7 +102,7 @@ async def calculate_route(request: RouteRequest):
             # POI lookup still needs Map Service unless we cache POIs too. 
             # For now, we assume POIs might change or are external entity.
             poi_response = await http_client.get(
-                f"{MAP_SERVICE_URL}/api/pois/{request.destination_id}"
+                f"{MAP_SERVICE_URL}/pois/{request.destination_id}"
             )
             if poi_response.status_code != 200:
                 raise HTTPException(status_code=404, detail="POI not found")
@@ -126,7 +126,7 @@ async def calculate_route(request: RouteRequest):
                 wait_time = None
         
         elif request.destination_type in ["seat", "gate"]:
-            endpoint = f"/api/{request.destination_type}s/{request.destination_id}"
+            endpoint = f"/{request.destination_type}s/{request.destination_id}"
             response = await http_client.get(f"{MAP_SERVICE_URL}{endpoint}")
             if response.status_code != 200:
                 raise HTTPException(status_code=404, detail=f"{request.destination_type.title()} not found")

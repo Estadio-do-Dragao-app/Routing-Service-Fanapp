@@ -56,7 +56,7 @@ class PathFinder:
 
     @staticmethod
     async def fetch_map_data(client: httpx.AsyncClient, service_url: str):
-        response = await client.get(f"{service_url}/api/map")
+        response = await client.get(f"{service_url}/map")
         response.raise_for_status()
         return response.json()
 
