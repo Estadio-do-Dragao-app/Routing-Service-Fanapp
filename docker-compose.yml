@@ -7,11 +7,22 @@ services:
     ports:
       - "8002:8002"
     environment:
+      - CLIENT_BROKER=client-mosquitto
+      - CLIENT_PORT=1883
+      - STADIUM_BROKER=stadium-mosquitto
+      - STADIUM_PORT=1883
       - MAP_SERVICE_URL=http://map-service:8001
-      - CONGESTION_SERVICE_URL=http://congestion-service:8003
+      - WAITTIME_SERVICE_URL=http://waittime-service:8003
+      - CONGESTION_SERVICE_URL=http://congestion-service:8004
     networks:
       - stadium-network
+      - client-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Placeholder for Map Service (Uncomment if you have the image/context)
   # map-service:
@@ -32,3 +43,5 @@ services:
 networks:
   stadium-network:
     driver: bridge
+  client-network:
+    external: true

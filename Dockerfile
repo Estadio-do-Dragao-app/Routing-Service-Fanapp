@@ -20,6 +20,10 @@ EXPOSE 8002
 # Define environment variables (optional defaults, can be overridden)
 ENV MAP_SERVICE_URL="http://host.docker.internal:8001"
 ENV CONGESTION_SERVICE_URL="http://host.docker.internal:8003"
+ENV CLIENT_BROKER="localhost"
+ENV CLIENT_PORT="1884"
+ENV STADIUM_BROKER="localhost"
+ENV STADIUM_PORT="1883"
 
 # Run the app
 CMD ["python", "main.py"]
