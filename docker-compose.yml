@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  routing-service:
+    build: .
+    container_name: routing-service
+    ports:
+      - "8002:8002"
+    environment:
+      - MAP_SERVICE_URL=http://map-service:8001
+      - CONGESTION_SERVICE_URL=http://congestion-service:8003
+    networks:
+      - stadium-network
+    restart: unless-stopped
+
+  # Placeholder for Map Service (Uncomment if you have the image/context)
+  # map-service:
+  #   build: ../Map-Service-Fanapp
+  #   ports:
+  #     - "8001:8001"
+  #   networks:
+  #     - stadium-network
+
+  # Placeholder for Congestion Service
+  # congestion-service:
+  #   build: ../Congestion-Service-Fanapp
+  #   ports:
+  #     - "8003:8003"
+  #   networks:
+  #     - stadium-network
+
+networks:
+  stadium-network:
+    driver: bridge
