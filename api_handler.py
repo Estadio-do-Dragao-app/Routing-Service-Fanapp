@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from typing import Optional
+from typing import Optional, Dict
 from contextlib import asynccontextmanager
 import httpx
 import os
@@ -29,6 +29,75 @@ pathfinder: Optional[PathFinder] = None
 session_manager: Optional[RouteSessionManager] = None
 mqtt_handler: Optional[MQTTRoutingHandler] = None
 cleanup_task = None
+
+# Cache for wait times received via MQTT (poi_id -> wait_minutes)
+waittime_cache: Dict[str, float] = {}
+
+
+def handle_waittime_update(poi_id: str, payload: dict):
+    """Handle wait time updates from MQTT broker and trigger rerouting if needed"""
+    global waittime_cache
+    try:
+        # Support multiple payload formats:
+        # - Wait Time Service uses "minutes"
+        # - Fallback to "wait_minutes" or "wait_time"
+        wait_minutes = payload.get('minutes', payload.get('wait_minutes', payload.get('wait_time', 0)))
+        old_wait = waittime_cache.get(poi_id, 0)
+        waittime_cache[poi_id] = float(wait_minutes)
+        logger.info(f"[WAITTIME] Updated cache: {poi_id} = {wait_minutes} min")
+        
+        # Trigger rerouting check if wait time changed significantly (> 2 min difference)
+        if abs(wait_minutes - old_wait) > 2 and session_manager and pathfinder:
+            check_reroutes_for_waittime_change(poi_id, wait_minutes)
+            
+    except Exception as e:
+        logger.error(f"[WAITTIME] Failed to process update for {poi_id}: {e}")
+
+
+def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: float):
+    """Check if active sessions need rerouting due to wait time change"""
+    if not session_manager or not pathfinder or not mqtt_handler:
+        return
+    
+    active_sessions = session_manager.get_active_sessions()
+    
+    for session in active_sessions:
+        # Check if POI is in current route
+        if poi_id not in session.current_route:
+            continue
+        
+        # Estimate current position
+        estimated_node, confidence = session.estimate_current_position(pathfinder)
+        
+        # Only recalculate if we have good position confidence
+        if confidence < 0.5:
+            continue
+        
+        try:
+            # Recalculate route from estimated position
+            new_route, new_cost = pathfinder.find_path(
+                estimated_node,
+                session.end_node,
+                {"cells": []},  # Use empty congestion (will be refreshed separately)
+                avoid_stairs=session.avoid_stairs,
+                waittime_data=waittime_cache
+            )
+            
+            if not new_route:
+                continue
+            
+            # Check if rerouting is beneficial
+            suggestion = session_manager.should_reroute(
+                session, new_route, new_cost,
+                reason=f"Wait time at {poi_id} changed to {new_wait_minutes:.0f} min"
+            )
+            
+            if suggestion:
+                mqtt_handler.publish_route_update(session.session_id, suggestion)
+                logger.info(f"[REROUTE] Suggested new route for session {session.session_id}")
+                
+        except Exception as e:
+            logger.error(f"[REROUTE] Failed to check reroute for {session.session_id}: {e}")
 
 
 async def cleanup_sessions():
@@ -81,6 +150,9 @@ async def lifespan(app: FastAPI):
             mqtt_handler.on_heartbeat = session_manager.handle_heartbeat
             mqtt_handler.on_waypoint = session_manager.handle_waypoint
             mqtt_handler.on_route_cancel = session_manager.handle_cancellation
+        
+        # Register wait time update handler
+        mqtt_handler.on_waittime_update = handle_waittime_update
         
         mqtt_handler.start()
         logger.info("[INIT] MQTT Handler started")
@@ -194,12 +266,13 @@ async def calculate_route(request: RouteRequest):
         if not end_node_id:
             raise HTTPException(status_code=404, detail="Destination node not found")
         
-        # 4. Calculate path (Internal logic + Dynamic Congestion)
+        # 4. Calculate path (Internal logic + Dynamic Congestion + Wait Times)
         path_ids, total_cost = pathfinder.find_path(
             start_node_id,
             end_node_id,
             congestion_data,
-            avoid_stairs=request.avoid_stairs
+            avoid_stairs=request.avoid_stairs,
+            waittime_data=waittime_cache
         )
         
         if not path_ids:

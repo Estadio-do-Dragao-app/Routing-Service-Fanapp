@@ -104,13 +104,21 @@ class PathFinder:
         start_node_id: str, 
         end_node_id: str,
         congestion_data: dict,
-        avoid_stairs: bool = False
+        avoid_stairs: bool = False,
+        waittime_data: Optional[Dict[str, float]] = None
     ) -> Tuple[List[str], float]:
         """
-        A* pathfinding algorithm with cached map and dynamic congestion
+        A* pathfinding algorithm with cached map, dynamic congestion,
+        and wait time penalties for POIs with queues.
+        
+        Args:
+            waittime_data: Dict mapping POI/node IDs to wait time in minutes
         """
         # Pre-process congestion lookup
         congestion_map = self._get_congestion_map(congestion_data)
+        
+        # Pre-process wait time lookup (default to empty dict if not provided)
+        waittime_map = waittime_data or {}
         
         # Closed nodes from static closures
         closed_nodes = {c['node_id'] for c in self.closures if c.get('node_id')}
@@ -174,6 +182,16 @@ class PathFinder:
                 if congestion_level > 0:
                     # Moderate penalty (4x) - Trade-off between delay and detour
                     weight *= (1.0 + (congestion_level * 4.0))
+                
+                # 4. Apply Wait Time Penalty for POIs with queues
+                # poi_id == node_id, so we can use neighbor directly
+                if neighbor in waittime_map:
+                    wait_minutes = waittime_map[neighbor]
+                    # Convert wait time to distance equivalent:
+                    # At 1.4 m/s walking speed = 84m per minute
+                    # So 5 min wait ≈ 420m detour would be acceptable
+                    wait_penalty = wait_minutes * 84
+                    weight += wait_penalty
                 
                 tentative_g = current_g + weight
                 

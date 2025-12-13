@@ -71,8 +71,8 @@ class MQTTRoutingHandler:
         if rc == 0:
             logger.info(f"[STADIUM] Connected to broker at {self.stadium_broker}:{self.stadium_port}")
             # Subscribe to service updates
-            client.subscribe("stadium/services/waittime/#")
-            logger.info("[STADIUM] Subscribed to topic: stadium/services/waittime/#")
+            client.subscribe("stadium/waittime/#")  # Wait Time Service publishes here
+            logger.info("[STADIUM] Subscribed to topic: stadium/waittime/#")
             client.subscribe("stadium/services/congestion")
             logger.info("[STADIUM] Subscribed to topic: stadium/services/congestion")
             client.subscribe("stadium/services/alerts/#")
