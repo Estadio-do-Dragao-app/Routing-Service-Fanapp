@@ -187,6 +187,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add CORS middleware (allows Flutter web app to make requests)
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify exact origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.post("/api/route", response_model=RouteResponse)
 async def calculate_route(request: RouteRequest):
     """
@@ -239,18 +249,8 @@ async def calculate_route(request: RouteRequest):
                 poi['x'], poi['y'], poi['level']
             )
             
-            # Get queue wait time for this POI from Congestion Service
-            # We can check our bulk congestion_data first
-            # But specific endpoint might be more accurate for 'wait time' specifically
-            try:
-                congestion_response = await http_client.get(
-                    f"{CONGESTION_SERVICE_URL}/heatmap/cell/{request.destination_id}"
-                )
-                if congestion_response.status_code == 200:
-                    cell_data = congestion_response.json()
-                    wait_time = cell_data['congestion_level'] * 10
-            except Exception:
-                wait_time = None
+            # Get queue wait time for this POI from the MQTT cache (populated by WaitTime Service)
+            wait_time = waittime_cache.get(request.destination_id)
         
         elif request.destination_type in ["seat", "gate"]:
             endpoint = f"/{request.destination_type}s/{request.destination_id}"

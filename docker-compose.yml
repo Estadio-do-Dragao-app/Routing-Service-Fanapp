@@ -11,12 +11,13 @@ services:
       - CLIENT_PORT=1883
       - STADIUM_BROKER=stadium-mosquitto
       - STADIUM_PORT=1883
-      - MAP_SERVICE_URL=http://map-service:8001
-      - WAITTIME_SERVICE_URL=http://waittime-service:8003
+      - MAP_SERVICE_URL=http://mapservice:8000
+      - WAITTIME_SERVICE_URL=http://stadium-waittime-service:8001
       - CONGESTION_SERVICE_URL=http://congestion-service:8004
     networks:
       - stadium-network
       - client-network
+      - map-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
@@ -24,24 +25,13 @@ services:
       timeout: 10s
       retries: 3
 
-  # Placeholder for Map Service (Uncomment if you have the image/context)
-  # map-service:
-  #   build: ../Map-Service-Fanapp
-  #   ports:
-  #     - "8001:8001"
-  #   networks:
-  #     - stadium-network
-
-  # Placeholder for Congestion Service
-  # congestion-service:
-  #   build: ../Congestion-Service-Fanapp
-  #   ports:
-  #     - "8003:8003"
-  #   networks:
-  #     - stadium-network
-
 networks:
   stadium-network:
-    driver: bridge
+    external: true
+    name: stadium-event-generator_stadium-network
   client-network:
     external: true
+    name: service-to-client-broker_client-network
+  map-network:
+    external: true
+    name: map-service_map-network

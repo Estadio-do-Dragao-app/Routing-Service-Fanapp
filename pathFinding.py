@@ -164,12 +164,17 @@ class PathFinder:
                 if neighbor in visited or neighbor in closed_nodes:
                     continue
                 
-                # 1. Check Hazards (Hard Block)
+                # 1. Block seat nodes as intermediate points (seats can only be start/end)
+                neighbor_type = self.nodes.get(neighbor, {}).get('type', '')
+                if neighbor_type == 'seat' and neighbor != end_node_id:
+                    continue  # Skip seats unless they are the destination
+                
+                # 2. Check Hazards (Hard Block)
                 congestion_level = congestion_map.get(neighbor, 0.0)
                 if congestion_level > 2.0: # > 200% congestion = Blocked (Fire/Danger)
                     continue
 
-                # 2. Check Stairs (Accessibility)
+                # 3. Check Stairs (Accessibility)
                 if avoid_stairs:
                     n_from = self.nodes[current]
                     n_to = self.nodes[neighbor]
