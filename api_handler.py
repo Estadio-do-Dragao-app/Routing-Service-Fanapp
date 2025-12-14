@@ -21,8 +21,6 @@ MAP_SERVICE_URL = os.getenv("MAP_SERVICE_URL", "http://localhost:8000")
 CONGESTION_SERVICE_URL = os.getenv("CONGESTION_SERVICE_URL", "http://localhost:8001")
 CLIENT_BROKER = os.getenv("CLIENT_BROKER", "localhost")
 CLIENT_PORT = int(os.getenv("CLIENT_PORT", 1884))
-STADIUM_BROKER = os.getenv("STADIUM_BROKER", None)
-STADIUM_PORT = int(os.getenv("STADIUM_PORT", 1883))
 
 http_client: Optional[httpx.AsyncClient] = None
 pathfinder: Optional[PathFinder] = None
@@ -32,6 +30,9 @@ cleanup_task = None
 
 # Cache for wait times received via MQTT (poi_id -> wait_minutes)
 waittime_cache: Dict[str, float] = {}
+
+# Cache for congestion data received via MQTT (cell_id -> congestion_level)
+congestion_cache: Dict[str, float] = {}
 
 
 def handle_waittime_update(poi_id: str, payload: dict):
@@ -100,6 +101,77 @@ def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: float):
             logger.error(f"[REROUTE] Failed to check reroute for {session.session_id}: {e}")
 
 
+def handle_congestion_update(payload: dict):
+    """Handle congestion updates from MQTT broker and trigger rerouting if needed"""
+    global congestion_cache
+    try:
+        cell_id = payload.get('cell_id')
+        new_level = payload.get('congestion_level', 0)
+        
+        if not cell_id:
+            return
+        
+        old_level = congestion_cache.get(cell_id, 0)
+        congestion_cache[cell_id] = float(new_level)
+        
+        # Trigger rerouting check if congestion changed significantly (> 20% difference)
+        level_diff = abs(new_level - old_level)
+        if level_diff > 0.2 and session_manager and pathfinder:
+            logger.info(f"[CONGESTION] Cell {cell_id} changed: {old_level:.2f} -> {new_level:.2f}")
+            check_reroutes_for_congestion_change(cell_id, new_level)
+            
+    except Exception as e:
+        logger.error(f"[CONGESTION] Failed to process update: {e}")
+
+
+def check_reroutes_for_congestion_change(cell_id: str, new_congestion: float):
+    """Check if active sessions need rerouting due to congestion change"""
+    if not session_manager or not pathfinder or not mqtt_handler:
+        return
+    
+    active_sessions = session_manager.get_active_sessions()
+    
+    for session in active_sessions:
+        # Estimate current position
+        estimated_node, confidence = session.estimate_current_position(pathfinder)
+        
+        # Only recalculate if we have reasonable position confidence
+        if confidence < 0.4:
+            continue
+        
+        try:
+            # Build congestion data for pathfinding from cache
+            congestion_data = {"cells": [
+                {"cell_id": cid, "congestion_level": level}
+                for cid, level in congestion_cache.items()
+            ]}
+            
+            # Recalculate route from estimated position with current congestion
+            new_route, new_cost = pathfinder.find_path(
+                estimated_node,
+                session.end_node,
+                congestion_data,
+                avoid_stairs=session.avoid_stairs,
+                waittime_data=waittime_cache
+            )
+            
+            if not new_route:
+                continue
+            
+            # Check if rerouting is beneficial
+            suggestion = session_manager.should_reroute(
+                session, new_route, new_cost,
+                reason=f"Congestion changed in area (cell {cell_id})"
+            )
+            
+            if suggestion:
+                mqtt_handler.publish_route_update(session.session_id, suggestion)
+                logger.info(f"[REROUTE] Suggested new route for session {session.session_id} due to congestion")
+                
+        except Exception as e:
+            logger.error(f"[REROUTE] Failed to check congestion reroute for {session.session_id}: {e}")
+
+
 async def cleanup_sessions():
     """Periodically cleanup expired sessions"""
     while True:
@@ -140,9 +212,7 @@ async def lifespan(app: FastAPI):
     try:
         mqtt_handler = MQTTRoutingHandler(
             client_broker=CLIENT_BROKER,
-            client_port=CLIENT_PORT,
-            stadium_broker=STADIUM_BROKER,
-            stadium_port=STADIUM_PORT
+            client_port=CLIENT_PORT
         )
         
         # Set callback handlers
@@ -153,6 +223,9 @@ async def lifespan(app: FastAPI):
         
         # Register wait time update handler
         mqtt_handler.on_waittime_update = handle_waittime_update
+        
+        # Register congestion update handler
+        mqtt_handler.on_congestion_update = handle_congestion_update
         
         mqtt_handler.start()
         logger.info("[INIT] MQTT Handler started")
