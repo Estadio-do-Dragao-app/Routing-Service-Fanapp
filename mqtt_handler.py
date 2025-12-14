@@ -63,6 +63,9 @@ class MQTTRoutingHandler:
             logger.info("[CLIENT] Subscribed to topic: stadium/clients/+/waypoint")
             client.subscribe("stadium/clients/+/route/cancel")
             logger.info("[CLIENT] Subscribed to topic: stadium/clients/+/route/cancel")
+            # Subscribe to waittime from WaitTime-Service (publishes to client broker)
+            client.subscribe("stadium/waittime/#")
+            logger.info("[CLIENT] Subscribed to topic: stadium/waittime/#")
         else:
             logger.error(f"[CLIENT] Connection failed with code {rc}")
     
@@ -91,12 +94,19 @@ class MQTTRoutingHandler:
             logger.warning(f"[STADIUM] Unexpected disconnection. Code: {rc}")
     
     def _on_client_message(self, client, userdata, msg):
-        """Process incoming messages from clients"""
+        """Process incoming messages from clients and services on client broker"""
         try:
             topic = msg.topic
             payload = json.loads(msg.payload.decode())
             
-            if "/heartbeat" in topic:
+            if "waittime" in topic:
+                # Wait time update from WaitTime-Service
+                poi_id = topic.split("/")[-1]
+                logger.info(f"[CLIENT] Received waittime update for POI: {poi_id}")
+                if self.on_waittime_update:
+                    self.on_waittime_update(poi_id, payload)
+            
+            elif "/heartbeat" in topic:
                 # Extract ticket_id from topic
                 parts = topic.split("/")
                 ticket_id = parts[2] if len(parts) > 2 else None
