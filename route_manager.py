@@ -39,6 +39,30 @@ class RouteSession:
     SESSION_TIMEOUT: float = 300  # 5 minutes
     HEARTBEAT_TIMEOUT: float = 120  # 2 minutes
     
+    @property
+    def current_waypoint(self) -> Optional[str]:
+        """Get estimated current waypoint based on time elapsed and route progress"""
+        if not self.current_route:
+            return self.start_node
+        
+        # Estimate position based on time elapsed (1.4 m/s walking speed)
+        time_elapsed = time.time() - self.start_time
+        distance_traveled = time_elapsed * 1.4  # meters
+        
+        # If we have checkpoints, use them as starting point
+        if self.last_checkpoint and self.last_checkpoint.node_id:
+            if self.last_checkpoint.node_id in self.current_route:
+                idx = self.current_route.index(self.last_checkpoint.node_id)
+                # Return the checkpoint or next waypoint
+                if idx < len(self.current_route) - 1:
+                    return self.current_route[idx + 1]
+                return self.last_checkpoint.node_id
+        
+        # Estimate based on distance: use middle of route as fallback
+        # This is better than start_node for evacuation purposes
+        mid_idx = len(self.current_route) // 2
+        return self.current_route[mid_idx] if mid_idx > 0 else self.current_route[0]
+    
     def update_heartbeat(self):
         """Update last heartbeat timestamp"""
         self.last_heartbeat = time.time()
@@ -241,6 +265,10 @@ class RouteSessionManager:
         
         # Estimate current position and confidence
         estimated_node, confidence = session.estimate_current_position(self.pathfinder)
+        
+        # Avoid division by zero
+        if session.total_cost <= 0:
+            return None
         
         # Calculate improvement
         cost_improvement = (session.total_cost - new_cost) / session.total_cost

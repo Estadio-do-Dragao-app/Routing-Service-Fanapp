@@ -105,7 +105,8 @@ class PathFinder:
         end_node_id: str,
         congestion_data: dict,
         avoid_stairs: bool = False,
-        waittime_data: Optional[Dict[str, float]] = None
+        waittime_data: Optional[Dict[str, float]] = None,
+        blocked_nodes: Optional[Set[str]] = None
     ) -> Tuple[List[str], float]:
         """
         A* pathfinding algorithm with cached map, dynamic congestion,
@@ -113,6 +114,7 @@ class PathFinder:
         
         Args:
             waittime_data: Dict mapping POI/node IDs to wait time in minutes
+            blocked_nodes: Set of node/tile IDs blocked by emergency closures
         """
         # Pre-process congestion lookup
         congestion_map = self._get_congestion_map(congestion_data)
@@ -120,8 +122,10 @@ class PathFinder:
         # Pre-process wait time lookup (default to empty dict if not provided)
         waittime_map = waittime_data or {}
         
-        # Closed nodes from static closures
+        # Closed nodes from static closures + dynamic emergency closures
         closed_nodes = {c['node_id'] for c in self.closures if c.get('node_id')}
+        if blocked_nodes:
+            closed_nodes.update(blocked_nodes)
         
         # A* algorithm
         def heuristic(node_id: str) -> float:

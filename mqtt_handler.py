@@ -44,11 +44,14 @@ class MQTTRoutingHandler:
             client.subscribe("stadium/clients/+/route/cancel")
             logger.info("[MQTT] Subscribed to topic: stadium/clients/+/route/cancel")
             # Subscribe to waittime from WaitTime-Service
-            client.subscribe("stadium/waittime/#")
-            logger.info("[MQTT] Subscribed to topic: stadium/waittime/#")
+            client.subscribe("stadium/services/waittime/#")
+            logger.info("[MQTT] Subscribed to topic: stadium/services/waittime/#")
             # Subscribe to congestion from Congestion-Service
             client.subscribe("stadium/services/congestion")
             logger.info("[MQTT] Subscribed to topic: stadium/services/congestion")
+            # Subscribe to emergency alerts from Alert-Service
+            client.subscribe("alerts/broadcast")
+            logger.info("[MQTT] Subscribed to topic: alerts/broadcast")
         else:
             logger.error(f"[MQTT] Connection failed with code {rc}")
     
@@ -97,6 +100,12 @@ class MQTTRoutingHandler:
                 logger.debug(f"[MQTT] Received congestion update")
                 if self.on_congestion_update:
                     self.on_congestion_update(payload)
+            
+            elif topic == "alerts/broadcast":
+                # Emergency alert from Alert-Service
+                logger.info(f"[MQTT] Received emergency alert: {payload.get('alert_type', 'unknown')}")
+                if self.on_alert:
+                    self.on_alert(payload)
         
         except json.JSONDecodeError as e:
             logger.error(f"[MQTT] JSON decode error: {e}")

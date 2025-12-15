@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
-from typing import Optional, Dict
+from pydantic import BaseModel
+from typing import Optional, Dict, List
 from contextlib import asynccontextmanager
 import httpx
 import os
@@ -34,6 +35,12 @@ waittime_cache: Dict[str, float] = {}
 # Cache for congestion data received via MQTT (cell_id -> congestion_level)
 congestion_cache: Dict[str, float] = {}
 
+# Active emergency closures (set of tile IDs that cannot be traversed)
+active_closures: set = set()
+
+# Emergency exits cache (list of node IDs for emergency exits)
+emergency_exits: List[str] = []
+
 
 def handle_waittime_update(poi_id: str, payload: dict):
     """Handle wait time updates from MQTT broker and trigger rerouting if needed"""
@@ -45,57 +52,159 @@ def handle_waittime_update(poi_id: str, payload: dict):
         wait_minutes = payload.get('minutes', payload.get('wait_minutes', payload.get('wait_time', 0)))
         old_wait = waittime_cache.get(poi_id, 0)
         waittime_cache[poi_id] = float(wait_minutes)
-        logger.info(f"[WAITTIME] Updated cache: {poi_id} = {wait_minutes} min")
+        logger.info(f"[WAITTIME] Updated cache: {poi_id} = {wait_minutes} min (old={old_wait})")
         
         # Trigger rerouting check if wait time changed significantly (> 2 min difference)
-        if abs(wait_minutes - old_wait) > 2 and session_manager and pathfinder:
+        diff = abs(wait_minutes - old_wait)
+        has_deps = session_manager and pathfinder
+        if diff > 2 and has_deps:
+            logger.info(f"[WAITTIME] Triggering reroute check for {poi_id} (diff={diff:.1f} min)")
             check_reroutes_for_waittime_change(poi_id, wait_minutes)
+        else:
+            logger.debug(f"[WAITTIME] No reroute check: diff={diff:.1f}, has_deps={has_deps}")
             
     except Exception as e:
         logger.error(f"[WAITTIME] Failed to process update for {poi_id}: {e}")
 
 
+def get_poi_category(poi_id: str) -> str:
+    """Extract category from POI ID (e.g., 'Food-Norte-1' -> 'Food')"""
+    if '-' in poi_id:
+        return poi_id.split('-')[0]
+    return poi_id
+
+
+async def find_alternative_pois(poi_id: str, poi_category: str) -> List[dict]:
+    """Find alternative POIs of the same category with lower wait times"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{MAP_SERVICE_URL}/pois", timeout=5.0)
+            if response.status_code != 200:
+                return []
+            
+            all_pois = response.json()
+            alternatives = []
+            
+            for poi in all_pois:
+                # Check if same category but different POI
+                if poi['id'] != poi_id and poi['id'].startswith(poi_category + '-'):
+                    wait_time = waittime_cache.get(poi['id'], 0)
+                    alternatives.append({
+                        'id': poi['id'],
+                        'x': poi['x'],
+                        'y': poi['y'],
+                        'level': poi['level'],
+                        'wait_time': wait_time
+                    })
+            
+            # Sort by wait time (ascending)
+            alternatives.sort(key=lambda x: x['wait_time'])
+            return alternatives[:3]  # Return top 3 alternatives
+            
+    except Exception as e:
+        logger.error(f"[REROUTE] Failed to find alternative POIs: {e}")
+        return []
+
+
 def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: float):
     """Check if active sessions need rerouting due to wait time change"""
+    import asyncio
+    
     if not session_manager or not pathfinder or not mqtt_handler:
+        logger.warning(f"[REROUTE] Missing dependencies: session_manager={bool(session_manager)}, pathfinder={bool(pathfinder)}, mqtt={bool(mqtt_handler)}")
         return
     
     active_sessions = session_manager.get_active_sessions()
+    logger.info(f"[REROUTE] Checking {len(active_sessions)} active sessions for POI {poi_id}")
+    
+    # Get POI category for finding alternatives
+    poi_category = get_poi_category(poi_id)
     
     for session in active_sessions:
-        # Check if POI is in current route
-        if poi_id not in session.current_route:
+        # Only check sessions going to this POI
+        if session.end_node != poi_id:
             continue
+        
+        logger.info(f"[REROUTE] Session {session.session_id} is going to {poi_id}")
         
         # Estimate current position
         estimated_node, confidence = session.estimate_current_position(pathfinder)
+        logger.info(f"[REROUTE] Session {session.session_id}: position confidence={confidence:.2f}, node={estimated_node}")
         
         # Only recalculate if we have good position confidence
         if confidence < 0.5:
+            logger.info(f"[REROUTE] Session {session.session_id}: skipping due to low confidence ({confidence:.2f})")
             continue
         
         try:
-            # Recalculate route from estimated position
-            new_route, new_cost = pathfinder.find_path(
-                estimated_node,
-                session.end_node,
-                {"cells": []},  # Use empty congestion (will be refreshed separately)
-                avoid_stairs=session.avoid_stairs,
-                waittime_data=waittime_cache
-            )
+            # Find alternative POIs with lower wait time
+            loop = asyncio.new_event_loop()
+            alternatives = loop.run_until_complete(find_alternative_pois(poi_id, poi_category))
+            loop.close()
             
-            if not new_route:
+            if not alternatives:
+                logger.info(f"[REROUTE] Session {session.session_id}: no alternative POIs found")
                 continue
             
-            # Check if rerouting is beneficial
-            suggestion = session_manager.should_reroute(
-                session, new_route, new_cost,
-                reason=f"Wait time at {poi_id} changed to {new_wait_minutes:.0f} min"
-            )
+            # Find best alternative (lowest total cost = travel + wait)
+            best_alt = None
+            best_cost = float('inf')
+            best_route = None
             
-            if suggestion:
+            for alt in alternatives:
+                alt_node = pathfinder.find_nearest_node(alt['x'], alt['y'], alt['level'])
+                if not alt_node:
+                    continue
+                
+                new_route, travel_cost = pathfinder.find_path(
+                    estimated_node,
+                    alt_node,
+                    {"cells": []},
+                    avoid_stairs=session.avoid_stairs,
+                    waittime_data=waittime_cache
+                )
+                
+                if new_route:
+                    # Total cost includes travel + wait time at destination
+                    total_cost = travel_cost + (alt['wait_time'] * 60)  # Convert wait to seconds
+                    if total_cost < best_cost:
+                        best_cost = total_cost
+                        best_alt = alt
+                        best_route = new_route
+            
+            if not best_alt:
+                logger.info(f"[REROUTE] Session {session.session_id}: no viable alternatives found")
+                continue
+            
+            # Compare with current destination cost
+            current_wait = waittime_cache.get(poi_id, 0) * 60  # Wait in seconds
+            current_cost = session.total_cost + current_wait
+            
+            improvement = (current_cost - best_cost) / current_cost if current_cost > 0 else 0
+            logger.info(f"[REROUTE] Session {session.session_id}: alternative {best_alt['id']} cost={best_cost:.0f} vs current={current_cost:.0f} (improvement={improvement*100:.1f}%)")
+            
+            # Suggest reroute if improvement > 20%
+            if improvement > 0.20:
+                time_saved = current_cost - best_cost
+                suggestion = {
+                    "type": "reroute_suggestion",
+                    "session_id": session.session_id,
+                    "reason": f"Wait time at {poi_id} is {new_wait_minutes:.0f}min. {best_alt['id']} has {best_alt['wait_time']:.0f}min wait.",
+                    "confidence": round(confidence, 2),
+                    "current_estimate_node": estimated_node,
+                    "new_route": best_route,
+                    "new_destination": best_alt['id'],
+                    "improvement": {
+                        "cost_reduction": round(improvement * 100, 1),
+                        "time_saved_seconds": round(time_saved, 0),
+                        "time_saved_display": f"{int(time_saved // 60)}min {int(time_saved % 60)}s"
+                    }
+                }
+                
                 mqtt_handler.publish_route_update(session.session_id, suggestion)
-                logger.info(f"[REROUTE] Suggested new route for session {session.session_id}")
+                logger.info(f"[REROUTE] Suggested alternative {best_alt['id']} for session {session.session_id}")
+            else:
+                logger.info(f"[REROUTE] Session {session.session_id}: improvement not significant enough")
                 
         except Exception as e:
             logger.error(f"[REROUTE] Failed to check reroute for {session.session_id}: {e}")
@@ -172,6 +281,161 @@ def check_reroutes_for_congestion_change(cell_id: str, new_congestion: float):
             logger.error(f"[REROUTE] Failed to check congestion reroute for {session.session_id}: {e}")
 
 
+def handle_emergency_alert(payload: dict):
+    """Handle emergency alerts from Alert-Service and trigger evacuation routes"""
+    global active_closures
+    
+    try:
+        alert_type = payload.get('alert_type', 'unknown').upper()
+        affected_areas = payload.get('affected_areas', [])  # Tile IDs
+        severity = payload.get('severity', 3)
+        level = payload.get('level', 0)  # Stadium level affected
+        
+        logger.info(f"[EMERGENCY] Processing {alert_type} alert - Severity: {severity}, Affected tiles: {len(affected_areas)}")
+        
+        # For FIRE or high-severity alerts, resolve tiles to nodes and add to closures
+        if alert_type in ['FIRE', 'EVACUATION', 'SECURITY'] or severity >= 4:
+            if affected_areas:
+                # Resolve tile IDs to node IDs via Map-Service
+                resolved_nodes = resolve_tiles_to_nodes(affected_areas)
+                for node_id in resolved_nodes:
+                    active_closures.add(node_id)
+                logger.info(f"[EMERGENCY] Resolved {len(affected_areas)} tiles to {len(resolved_nodes)} nodes. Total active closures: {len(active_closures)}")
+        
+        # Trigger evacuation routes for all active sessions
+        if alert_type in ['FIRE', 'EVACUATION'] or severity >= 5:
+            trigger_evacuation_routes(level)
+            
+    except Exception as e:
+        logger.error(f"[EMERGENCY] Failed to process alert: {e}")
+
+
+def resolve_tiles_to_nodes(tile_ids: list) -> set:
+    """Call Map-Service to resolve tile IDs to node IDs"""
+    import requests
+    
+    map_service_url = os.getenv('MAP_SERVICE_URL', 'http://mapservice:8000')
+    
+    try:
+        response = requests.post(
+            f"{map_service_url}/maps/grid/tiles/nodes",
+            json=tile_ids,
+            timeout=5
+        )
+        response.raise_for_status()
+        data = response.json()
+        node_ids = set(data.get('node_ids', []))
+        logger.info(f"[EMERGENCY] Resolved tiles via Map-Service: {len(node_ids)} nodes from {data.get('tile_count', 0)} tiles")
+        return node_ids
+    except Exception as e:
+        logger.error(f"[EMERGENCY] Failed to resolve tiles to nodes: {e}")
+        return set()
+
+
+
+def trigger_evacuation_routes(alert_level: int = None):
+    """Calculate and send evacuation routes to all active sessions"""
+    if not session_manager or not pathfinder or not mqtt_handler:
+        logger.warning("[EMERGENCY] Cannot trigger evacuation - services not initialized")
+        return
+    
+    active_sessions = session_manager.get_active_sessions()
+    logger.info(f"[EMERGENCY] Triggering evacuation for {len(active_sessions)} active sessions")
+    
+    for session in active_sessions:
+        try:
+            # Estimate current position
+            estimated_node, confidence = session.estimate_current_position(pathfinder)
+            
+            if not estimated_node or confidence < 0.3:
+                # Use last known waypoint or start node
+                estimated_node = session.current_waypoint or session.start_node
+            
+            if not estimated_node:
+                continue
+            
+            # Find route to nearest emergency exit
+            # Get node info to know the level
+            node_info = pathfinder.nodes.get(estimated_node, {})
+            user_level = node_info.get('level', 0)
+            
+            # Find emergency exit nodes (filter by level if possible)
+            exit_nodes = [
+                nid for nid, node in pathfinder.nodes.items()
+                if node.get('type') == 'emergency_exit'
+            ]
+            
+            if not exit_nodes:
+                # Fallback: use gate nodes as exits
+                exit_nodes = [
+                    nid for nid, node in pathfinder.nodes.items()
+                    if node.get('type') == 'gate'
+                ]
+            
+            if not exit_nodes:
+                logger.warning(f"[EMERGENCY] No exit nodes found for session {session.session_id}")
+                continue
+            
+            # Build congestion data with closures applied
+            congestion_data = {"cells": [
+                {"cell_id": cid, "congestion_level": level}
+                for cid, level in congestion_cache.items()
+            ]}
+            
+            # Find path to nearest valid exit (avoiding closures)
+            best_route = None
+            best_cost = float('inf')
+            best_exit = None
+            
+            logger.info(f"[EMERGENCY] Testing {len(exit_nodes)} exit nodes for session from {estimated_node}")
+            exit_costs = {}
+            
+            for exit_node in exit_nodes:
+                try:
+                    route, cost = pathfinder.find_path(
+                        estimated_node,
+                        exit_node,
+                        congestion_data,
+                        avoid_stairs=session.avoid_stairs,
+                        waittime_data=waittime_cache,
+                        blocked_nodes=active_closures
+                    )
+                    
+                    if route:
+                        exit_costs[exit_node] = cost
+                        if cost < best_cost:
+                            best_route = route
+                            best_cost = cost
+                            best_exit = exit_node
+                        
+                except Exception as e:
+                    logger.debug(f"[EMERGENCY] No route to exit {exit_node}: {e}")
+                    continue
+            
+            # Log all tested exits for debugging
+            sorted_exits = sorted(exit_costs.items(), key=lambda x: x[1])
+            logger.info(f"[EMERGENCY] Exit costs (top 5): {sorted_exits[:5]}")
+            
+            if best_route:
+                # Create evacuation route update
+                evacuation_update = {
+                    "type": "evacuation",
+                    "reason": "Emergency evacuation - follow this route to the nearest exit",
+                    "route": best_route,
+                    "cost": best_cost,
+                    "destination": best_exit,
+                    "priority": "high",
+                    "replaces_current_route": True
+                }
+                
+                mqtt_handler.publish_route_update(session.session_id, evacuation_update)
+                logger.info(f"[EMERGENCY] Sent evacuation route to session {session.session_id} -> exit {best_exit}")
+            else:
+                logger.warning(f"[EMERGENCY] No evacuation route found for session {session.session_id}")
+                
+        except Exception as e:
+            logger.error(f"[EMERGENCY] Failed to calculate evacuation for {session.session_id}: {e}")
+
 async def cleanup_sessions():
     """Periodically cleanup expired sessions"""
     while True:
@@ -227,6 +491,9 @@ async def lifespan(app: FastAPI):
         # Register congestion update handler
         mqtt_handler.on_congestion_update = handle_congestion_update
         
+        # Register emergency alert handler
+        mqtt_handler.on_alert = handle_emergency_alert
+        
         mqtt_handler.start()
         logger.info("[INIT] MQTT Handler started")
     except Exception as e:
@@ -269,6 +536,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class AlertRequest(BaseModel):
+    alert_type: str
+    severity: int
+    message: Optional[str] = "Emergency Alert"
+    affected_areas: Optional[List[str]] = []
+    level: Optional[int] = 0
+
+@app.post("/api/alerts")
+async def trigger_alert(request: AlertRequest):
+    """
+    Manually trigger an emergency alert via HTTP
+    """
+    logger.info(f"[API] Received manual alert trigger: {request.alert_type}")
+    handle_emergency_alert(request.dict())
+    return {"status": "processed", "alert_type": request.alert_type}
 
 @app.post("/api/route", response_model=RouteResponse)
 async def calculate_route(request: RouteRequest):
@@ -340,12 +624,14 @@ async def calculate_route(request: RouteRequest):
             raise HTTPException(status_code=404, detail="Destination node not found")
         
         # 4. Calculate path (Internal logic + Dynamic Congestion + Wait Times)
+        # Apply active closures (e.g. fire zones)
         path_ids, total_cost = pathfinder.find_path(
             start_node_id,
             end_node_id,
             congestion_data,
             avoid_stairs=request.avoid_stairs,
-            waittime_data=waittime_cache
+            waittime_data=waittime_cache,
+            blocked_nodes=active_closures  # Use global active closures
         )
         
         if not path_ids:
@@ -396,9 +682,12 @@ async def calculate_route(request: RouteRequest):
         # Create session if ticket_id provided
         session_id = None
         mqtt_topic = None
-        if request.ticket_id and session_manager:
+        if session_manager:
+            # Use ticket_id if provided, otherwise generate a fallback session ID
+            import uuid
+            effective_ticket_id = request.ticket_id or f"anon-{uuid.uuid4().hex[:8]}"
             session = session_manager.create_session(
-                ticket_id=request.ticket_id,
+                ticket_id=effective_ticket_id,
                 start_node=start_node_id,
                 end_node=end_node_id,
                 destination_type=request.destination_type,
@@ -409,6 +698,7 @@ async def calculate_route(request: RouteRequest):
             )
             session_id = session.session_id
             mqtt_topic = f"stadium/services/routing/{session_id}"
+            logger.info(f"[SESSION] Created session {session_id} for route to {end_node_id}")
         
         return RouteResponse(
             path=path_nodes,
