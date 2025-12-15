@@ -97,9 +97,10 @@ async def find_alternative_pois(poi_id: str, poi_category: str) -> List[dict]:
                         'wait_time': wait_time
                     })
             
-            # Sort by wait time (ascending)
+            # Sort by wait time (ascending) but return ALL alternatives
+            # The caller will calculate actual travel distance for each
             alternatives.sort(key=lambda x: x['wait_time'])
-            return alternatives[:3]  # Return top 3 alternatives
+            return alternatives  # Return all alternatives for proximity calculation
             
     except Exception as e:
         logger.error(f"[REROUTE] Failed to find alternative POIs: {e}")
@@ -117,12 +118,17 @@ def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: float):
     active_sessions = session_manager.get_active_sessions()
     logger.info(f"[REROUTE] Checking {len(active_sessions)} active sessions for POI {poi_id}")
     
+    # Debug: log all destination_ids
+    for s in active_sessions:
+        logger.info(f"[REROUTE] DEBUG: Session {s.session_id} destination_id='{s.destination_id}' destination_type='{s.destination_type}'")
+    
     # Get POI category for finding alternatives
     poi_category = get_poi_category(poi_id)
     
     for session in active_sessions:
-        # Only check sessions going to this POI
-        if session.end_node != poi_id:
+        # Only check sessions going to this POI (use destination_id, not end_node)
+        # end_node is a node ID (e.g., N124), destination_id is the POI ID (e.g., WC-Norte-1)
+        if session.destination_id != poi_id:
             continue
         
         logger.info(f"[REROUTE] Session {session.session_id} is going to {poi_id}")
@@ -194,6 +200,7 @@ def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: float):
                     "current_estimate_node": estimated_node,
                     "new_route": best_route,
                     "new_destination": best_alt['id'],
+                    "category": poi_category,  # Category for nearest_category lookup (e.g., "WC", "Food")
                     "improvement": {
                         "cost_reduction": round(improvement * 100, 1),
                         "time_saved_seconds": round(time_saved, 0),
@@ -619,6 +626,71 @@ async def calculate_route(request: RouteRequest):
             end_node_id = pathfinder.find_nearest_node(
                 dest['x'], dest['y'], dest['level']
             )
+        
+        elif request.destination_type == "nearest_category":
+            # Find FASTEST POI of a category from user's position
+            # Uses actual pathfinding costs (congestion + wait + travel), not just distance
+            category = request.destination_id  # e.g., "WC", "Food"
+            
+            # Get all POIs
+            pois_response = await http_client.get(f"{MAP_SERVICE_URL}/pois")
+            if pois_response.status_code != 200:
+                raise HTTPException(status_code=404, detail="Could not fetch POIs")
+            
+            all_pois = pois_response.json()
+            
+            # Filter POIs by category
+            category_pois = [p for p in all_pois if p['id'].startswith(category + '-')]
+            if not category_pois:
+                raise HTTPException(status_code=404, detail=f"No POIs found for category {category}")
+            
+            # Calculate ACTUAL route cost to each POI (travel + congestion + wait)
+            best_poi = None
+            best_cost = float('inf')
+            best_poi_node = None
+            
+            for poi in category_pois:
+                # Find nearest node to this POI
+                poi_node = pathfinder.find_nearest_node(poi['x'], poi['y'], poi['level'])
+                if not poi_node:
+                    continue
+                
+                # Calculate actual route cost using pathfinder (includes congestion)
+                route, travel_cost = pathfinder.find_path(
+                    start_node_id,
+                    poi_node,
+                    congestion_data,
+                    avoid_stairs=request.avoid_stairs,
+                    waittime_data=waittime_cache,
+                    blocked_nodes=active_closures
+                )
+                
+                if not route:
+                    continue
+                
+                # Add wait time at this POI (converted to seconds)
+                poi_wait = waittime_cache.get(poi['id'], 0) * 60
+                total_cost = travel_cost + poi_wait
+                
+                logger.debug(f"[ROUTE] {poi['id']}: travel={travel_cost:.0f}s + wait={poi_wait:.0f}s = total={total_cost:.0f}s")
+                
+                if total_cost < best_cost:
+                    best_cost = total_cost
+                    best_poi = poi
+                    best_poi_node = poi_node
+            
+            if not best_poi:
+                raise HTTPException(status_code=404, detail=f"No accessible POI found in category {category}")
+            
+            logger.info(f"[ROUTE] Fastest {category}: {best_poi['id']} total_cost={best_cost:.0f}s (wait={waittime_cache.get(best_poi['id'], 0):.0f}m)")
+            
+            end_node_id = best_poi_node
+            
+            # Get queue wait time for this POI
+            wait_time = waittime_cache.get(best_poi['id'])
+            
+            # Store the actual POI ID for the session (so destination_id is correct)
+            request.destination_id = best_poi['id']
         
         if not end_node_id:
             raise HTTPException(status_code=404, detail="Destination node not found")
