@@ -190,7 +190,7 @@ class PathFinder:
                 weight = base_weight
                 if congestion_level > 0:
                     # Moderate penalty (4x) - Trade-off between delay and detour
-                    weight *= (1.0 + (congestion_level * 4.0))
+                    weight *= (1.0 + (congestion_level * 10.0))
                 
                 # 4. Apply Wait Time Penalty for POIs with queues
                 # poi_id == node_id, so we can use neighbor directly
