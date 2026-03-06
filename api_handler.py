@@ -469,16 +469,30 @@ async def lifespan(app: FastAPI):
     
     http_client = httpx.AsyncClient(timeout=10.0)
     
-    # Pre-fetch map data for hybrid architecture
-    try:
-        logger.info("[INIT] Fetching map data for cache...")
-        map_data = await PathFinder.fetch_map_data(http_client, MAP_SERVICE_URL)
-        pathfinder = PathFinder(map_data)
-        session_manager = RouteSessionManager(pathfinder)
-        logger.info(f"[INIT] Map cached: {len(pathfinder.nodes)} nodes")
-    except Exception as e:
-        logger.error(f"[INIT] Failed to load map data: {e}")
+    # Initialize with empty data first to avoid NameError
+    pathfinder = PathFinder({"nodes": [], "edges": []})
+    session_manager = RouteSessionManager(pathfinder)
     
+    # Pre-fetch map data for hybrid architecture with retries
+    max_retries = 10
+    retry_delay = 5
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"[INIT] Fetching map data for cache (attempt {attempt + 1}/{max_retries})...")
+            map_data = await PathFinder.fetch_map_data(http_client, MAP_SERVICE_URL)
+            pathfinder = PathFinder(map_data)
+            session_manager.pathfinder = pathfinder # Update in place
+            logger.info(f"[INIT] Map cached: {len(pathfinder.nodes)} nodes")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"[INIT] Failed to load map data: {e}. Retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"[INIT] Failed to load map data after {max_retries} attempts.")
+                # We allow startup to continue, but routing will fail until manual refresh
+                pass
+   
     # Start MQTT handler
     try:
         mqtt_handler = MQTTRoutingHandler(
@@ -561,6 +575,22 @@ async def trigger_alert(request: AlertRequest):
     handle_emergency_alert(request.dict())
     return {"status": "processed", "alert_type": request.alert_type}
 
+@app.post("/api/refresh_map")
+async def refresh_map():
+    """Manually trigger a map data refresh from mapservice"""
+    global pathfinder, session_manager
+    try:
+        logger.info("[API] Manual map refresh triggered...")
+        map_data = await PathFinder.fetch_map_data(http_client, MAP_SERVICE_URL)
+        new_pathfinder = PathFinder(map_data)
+        pathfinder = new_pathfinder
+        session_manager.pathfinder = pathfinder
+        logger.info(f"[API] Map refreshed: {len(pathfinder.nodes)} nodes")
+        return {"status": "success", "nodes": len(pathfinder.nodes)}
+    except Exception as e:
+        logger.error(f"[API] Failed to refresh map: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/route", response_model=RouteResponse)
 async def calculate_route(request: RouteRequest):
     """
@@ -600,18 +630,41 @@ async def calculate_route(request: RouteRequest):
             end_node_id = request.destination_id
         
         elif request.destination_type == "poi":
-            # POI lookup still needs Map Service unless we cache POIs too. 
-            # For now, we assume POIs might change or are external entity.
+            # POI lookup - try DB first, then OSM dynamic POIs
             poi_response = await http_client.get(
                 f"{MAP_SERVICE_URL}/pois/{request.destination_id}"
             )
-            if poi_response.status_code != 200:
-                raise HTTPException(status_code=404, detail="POI not found")
-            poi = poi_response.json()
             
-            end_node_id = pathfinder.find_nearest_node(
-                poi['x'], poi['y'], poi['level']
-            )
+            poi = None
+            if poi_response.status_code == 200:
+                poi = poi_response.json()
+            elif request.destination_id.startswith("OSM-"):
+                # Fallback: fetch from OSM POIs endpoint
+                try:
+                    osm_response = await http_client.get(
+                        f"{MAP_SERVICE_URL}/pois/osm", timeout=35.0
+                    )
+                    if osm_response.status_code == 200:
+                        osm_data = osm_response.json()
+                        for osm_poi in osm_data.get("pois", []):
+                            if osm_poi["id"] == request.destination_id:
+                                poi = osm_poi
+                                break
+                except Exception as e:
+                    logger.warning(f"[ROUTE] Failed to fetch OSM POIs: {e}")
+            
+            if not poi:
+                raise HTTPException(status_code=404, detail="POI not found")
+            
+            # OSM POIs have pre-computed nearest_node_id (snapped to walkable graph)
+            # Use it directly to avoid routing to building center
+            if poi.get('nearest_node_id') and poi['nearest_node_id'] in pathfinder.nodes:
+                end_node_id = poi['nearest_node_id']
+                logger.info(f"[ROUTE] Using pre-computed nearest_node_id: {end_node_id}")
+            else:
+                end_node_id = pathfinder.find_nearest_node(
+                    poi['x'], poi['y'], poi.get('level', 0)
+                )
             
             # Get queue wait time for this POI from the MQTT cache (populated by WaitTime Service)
             wait_time = waittime_cache.get(request.destination_id)
