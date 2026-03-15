@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+httpx
+python-dotenv
+pydantic
+sqlalchemy
+pytest
+pytest-asyncio
+paho-mqtt==1.6.1
+requests
