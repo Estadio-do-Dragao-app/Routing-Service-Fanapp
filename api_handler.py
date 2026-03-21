@@ -41,6 +41,9 @@ active_closures: set = set()
 # Emergency exits cache (list of node IDs for emergency exits)
 emergency_exits: List[str] = []
 
+# Cache of all POIs (loaded at startup, refreshed on map update)
+poi_cache: List[dict] = []
+
 
 def handle_waittime_update(poi_id: str, payload: dict):
     """Handle wait time updates from MQTT broker and trigger rerouting if needed"""
@@ -458,6 +461,37 @@ async def cleanup_sessions():
                     )
 
 
+async def sync_state(client: httpx.AsyncClient):
+    """Fetch POIs and Congestion into the global caches (called once at startup and on map update)."""
+    global poi_cache, congestion_cache
+
+    # Sync POIs
+    try:
+        resp = await client.get(f"{MAP_SERVICE_URL}/pois", timeout=10.0)
+        if resp.status_code == 200:
+            poi_cache = resp.json()
+            logger.info(f"[INIT] POIs cached: {len(poi_cache)}")
+        else:
+            logger.warning(f"[INIT] POI sync failed with status {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"[INIT] POI sync failed: {e}")
+
+    # Sync Congestion cells (initial full state)
+    try:
+        resp = await client.get(f"{CONGESTION_SERVICE_URL}/congestion", timeout=5.0)
+        if resp.status_code == 200:
+            cells = resp.json().get("cells", [])
+            for cell in cells:
+                cid = cell.get("cell_id", cell.get("id"))
+                if cid:
+                    congestion_cache[cid] = float(cell.get("congestion_level", 0.0))
+            logger.info(f"[INIT] Congestion state synced: {len(congestion_cache)} cells")
+        else:
+            logger.warning(f"[INIT] Congestion sync failed with status {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"[INIT] Congestion sync failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup resources on startup/shutdown"""
@@ -474,25 +508,25 @@ async def lifespan(app: FastAPI):
     session_manager = RouteSessionManager(pathfinder)
     
     # Pre-fetch map data for hybrid architecture with retries
-    max_retries = 10
-    retry_delay = 5
-    for attempt in range(max_retries):
+    map_loaded = False
+    for i in range(10):
         try:
-            logger.info(f"[INIT] Fetching map data for cache (attempt {attempt + 1}/{max_retries})...")
+            logger.info(f"[INIT] Fetching map data for cache... (Attempt {i+1}/10)")
             map_data = await PathFinder.fetch_map_data(http_client, MAP_SERVICE_URL)
             pathfinder = PathFinder(map_data)
             session_manager.pathfinder = pathfinder # Update in place
             logger.info(f"[INIT] Map cached: {len(pathfinder.nodes)} nodes")
+            map_loaded = True
             break
         except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"[INIT] Failed to load map data: {e}. Retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
-            else:
-                logger.error(f"[INIT] Failed to load map data after {max_retries} attempts.")
-                # We allow startup to continue, but routing will fail until manual refresh
-                pass
-   
+            logger.warning(f"[INIT] Failed to load map data: {e}")
+            await asyncio.sleep(5)
+            
+    if not map_loaded:
+        logger.warning("[INIT] Routing will require manual refresh after map service is up.")
+
+    # Sync POIs and Congestion into RAM caches
+    await sync_state(http_client)
     # Start MQTT handler
     try:
         mqtt_handler = MQTTRoutingHandler(
@@ -581,15 +615,25 @@ async def refresh_map():
     global pathfinder, session_manager
     try:
         logger.info("[API] Manual map refresh triggered...")
-        map_data = await PathFinder.fetch_map_data(http_client, MAP_SERVICE_URL)
-        new_pathfinder = PathFinder(map_data)
-        pathfinder = new_pathfinder
-        session_manager.pathfinder = pathfinder
-        logger.info(f"[API] Map refreshed: {len(pathfinder.nodes)} nodes")
-        return {"status": "success", "nodes": len(pathfinder.nodes)}
+        await _refresh_all_caches()
+        return {"status": "success", "nodes": len(pathfinder.nodes), "pois": len(poi_cache)}
     except Exception as e:
         logger.error(f"[API] Failed to refresh map: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _refresh_all_caches():
+    """Re-fetch map, POIs and congestion into RAM."""
+    global pathfinder, session_manager
+    client = http_client or httpx.AsyncClient(timeout=10.0)
+    # Refresh map graph
+    map_data = await PathFinder.fetch_map_data(client, MAP_SERVICE_URL)
+    pathfinder = PathFinder(map_data)
+    if session_manager:
+        session_manager.pathfinder = pathfinder
+    logger.info(f"[REFRESH] Map refreshed: {len(pathfinder.nodes)} nodes")
+    # Refresh POIs and congestion
+    await sync_state(client)
 
 @app.post("/api/route", response_model=RouteResponse)
 async def calculate_route(request: RouteRequest):
@@ -604,15 +648,18 @@ async def calculate_route(request: RouteRequest):
         if pathfinder is None:
              raise HTTPException(status_code=503, detail="Routing service not initialized (Map data missing)")
 
-        # 1. Fetch dynamic congestion data (Concurrent with other logic if we had more)
-        try:
-            congestion_data = await PathFinder.fetch_congestion_data(http_client, CONGESTION_SERVICE_URL)
-        except Exception:
-             # Fallback to empty congestion if service down (graceful degradation)
-             congestion_data = {"cells": []}
-             print("⚠️ Warning: Congestion service unavailable, using valid map data only.")
+        # 1. Build congestion data from RAM cache (updated continuously by MQTT)
+        congestion_data = {
+            "cells": [
+                {"cell_id": cid, "congestion_level": level}
+                for cid, level in congestion_cache.items()
+            ]
+        }
 
         # 2. Find nearest node to user's starting position (LOCAL LOOKUP)
+        logger.info(f"[DEBUG] Calculating route for start {request.start.x}, {request.start.y}, level={request.start.level} type={type(request.start.level)}")
+        logger.info(f"[DEBUG] Pathfinder has {len(pathfinder.nodes)} nodes. First node example: {list(pathfinder.nodes.values())[0] if pathfinder.nodes else 'EMPTY'}")
+        
         start_node_id = pathfinder.find_nearest_node(
             request.start.x, 
             request.start.y, 
@@ -630,16 +677,11 @@ async def calculate_route(request: RouteRequest):
             end_node_id = request.destination_id
         
         elif request.destination_type == "poi":
-            # POI lookup - try DB first, then OSM dynamic POIs
-            poi_response = await http_client.get(
-                f"{MAP_SERVICE_URL}/pois/{request.destination_id}"
-            )
-            
-            poi = None
-            if poi_response.status_code == 200:
-                poi = poi_response.json()
-            elif request.destination_id.startswith("OSM-"):
-                # Fallback: fetch from OSM POIs endpoint
+            # Lookup from RAM cache first, fall back to HTTP if not found
+            poi = next((p for p in poi_cache if p['id'] == request.destination_id), None)
+
+            if poi is None and request.destination_id.startswith("OSM-"):
+                # OSM POIs are dynamic – still fetched live
                 try:
                     osm_response = await http_client.get(
                         f"{MAP_SERVICE_URL}/pois/osm", timeout=35.0
@@ -652,7 +694,7 @@ async def calculate_route(request: RouteRequest):
                                 break
                 except Exception as e:
                     logger.warning(f"[ROUTE] Failed to fetch OSM POIs: {e}")
-            
+
             if not poi:
                 raise HTTPException(status_code=404, detail="POI not found")
             
@@ -667,7 +709,7 @@ async def calculate_route(request: RouteRequest):
                 )
             
             # Get queue wait time for this POI from the MQTT cache (populated by WaitTime Service)
-            wait_time = waittime_cache.get(request.destination_id)
+            wait_time = waittime_cache.get(request.destination_id, 0)
         
         elif request.destination_type in ["seat", "gate"]:
             endpoint = f"/{request.destination_type}s/{request.destination_id}"
@@ -682,18 +724,10 @@ async def calculate_route(request: RouteRequest):
         
         elif request.destination_type == "nearest_category":
             # Find FASTEST POI of a category from user's position
-            # Uses actual pathfinding costs (congestion + wait + travel), not just distance
             category = request.destination_id  # e.g., "WC", "Food"
             
-            # Get all POIs
-            pois_response = await http_client.get(f"{MAP_SERVICE_URL}/pois")
-            if pois_response.status_code != 200:
-                raise HTTPException(status_code=404, detail="Could not fetch POIs")
-            
-            all_pois = pois_response.json()
-            
-            # Filter POIs by category
-            category_pois = [p for p in all_pois if p['id'].startswith(category + '-')]
+            # Filter from RAM cache (no HTTP needed)
+            category_pois = [p for p in poi_cache if p['id'].startswith(category + '-')]
             if not category_pois:
                 raise HTTPException(status_code=404, detail=f"No POIs found for category {category}")
             
@@ -740,7 +774,7 @@ async def calculate_route(request: RouteRequest):
             end_node_id = best_poi_node
             
             # Get queue wait time for this POI
-            wait_time = waittime_cache.get(best_poi['id'])
+            wait_time = waittime_cache.get(best_poi['id'], 0)
             
             # Store the actual POI ID for the session (so destination_id is correct)
             request.destination_id = best_poi['id']
