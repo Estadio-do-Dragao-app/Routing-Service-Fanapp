@@ -181,10 +181,15 @@ class PathFinder:
 
                 # 3. Check Stairs (Accessibility)
                 if avoid_stairs:
-                    n_from = self.nodes[current]
-                    n_to = self.nodes[neighbor]
-                    # Block usage of stairs for VERTICAL travel
-                    if n_to.get('type') == 'stairs' and n_from['level'] != n_to['level']:
+                    n_from = self.nodes.get(current, {})
+                    n_to = self.nodes.get(neighbor, {})
+                    
+                    # Block usage if both nodes are 'stairs' (the edge between them is the stairs)
+                    is_stairs_edge = (n_from.get('type') == 'stairs' and n_to.get('type') == 'stairs')
+                    # Also block if moving to a stair on a different level
+                    is_vertical_stairs = (n_to.get('type') == 'stairs' and n_from.get('level') != n_to.get('level'))
+                    
+                    if is_stairs_edge or is_vertical_stairs:
                         continue
 
                 # 3. Calculate Weight (including Soft Congestion Penalty)
