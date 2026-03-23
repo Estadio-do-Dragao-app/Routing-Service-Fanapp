@@ -1,0 +1,14 @@
+name: Deploy to VM
+on:
+  push:
+    branches: [ "main" ]
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Update Service
+        run: |
+          cd ~/PEI/Routing-Service-Fanapp
+          git pull origin main
+          cd ..
+          docker compose up -d --build routing-service
