@@ -465,14 +465,31 @@ async def sync_state(client: httpx.AsyncClient):
     """Fetch POIs and Congestion into the global caches (called once at startup and on map update)."""
     global poi_cache, congestion_cache
 
-    # Sync POIs
+    # Sync POIs (Both DB and OSM)
     try:
+        # 1. Standard POIs from DB
         resp = await client.get(f"{MAP_SERVICE_URL}/pois", timeout=10.0)
+        standard_pois = []
         if resp.status_code == 200:
-            poi_cache = resp.json()
-            logger.info(f"[INIT] POIs cached: {len(poi_cache)}")
-        else:
-            logger.warning(f"[INIT] POI sync failed with status {resp.status_code}")
+            standard_pois = resp.json()
+            logger.info(f"[INIT] Standard POIs cached: {len(standard_pois)}")
+        
+        # 2. Dynamic POIs from OSM
+        resp_osm = await client.get(f"{MAP_SERVICE_URL}/pois/osm", timeout=35.0)
+        osm_pois = []
+        if resp_osm.status_code == 200:
+            osm_data = resp_osm.json()
+            osm_pois = osm_data.get("pois", [])
+            logger.info(f"[INIT] OSM POIs cached: {len(osm_pois)}")
+        
+        # Merge (prefer standard if ID conflicts, though unlikely)
+        merged_pois = {p['id']: p for p in osm_pois}
+        for p in standard_pois:
+            merged_pois[p['id']] = p
+            
+        poi_cache = list(merged_pois.values())
+        logger.info(f"[INIT] Total POIs cached: {len(poi_cache)}")
+        
     except Exception as e:
         logger.warning(f"[INIT] POI sync failed: {e}")
 
@@ -618,16 +635,38 @@ async def refresh_map():
         await _refresh_all_caches()
         return {"status": "success", "nodes": len(pathfinder.nodes), "pois": len(poi_cache)}
     except Exception as e:
-        logger.error(f"[API] Failed to refresh map: {e}")
+        logger.exception(f"[API] Failed to refresh map: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 async def _refresh_all_caches():
     """Re-fetch map, POIs and congestion into RAM."""
     global pathfinder, session_manager
-    client = http_client or httpx.AsyncClient(timeout=10.0)
-    # Refresh map graph
-    map_data = await PathFinder.fetch_map_data(client, MAP_SERVICE_URL)
+    client = http_client or httpx.AsyncClient(timeout=60.0)
+    # Refresh map graph (with retries, uploads may take a few seconds to settle)
+    map_data = None
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            map_data = await PathFinder.fetch_map_data(client, MAP_SERVICE_URL)
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"[REFRESH] Attempt {attempt}/3 failed fetching map from {MAP_SERVICE_URL}: {repr(e)}"
+            )
+            await asyncio.sleep(2)
+
+    if map_data is None:
+        raise RuntimeError(f"Failed to fetch map data after retries: {repr(last_error)}")
+    
+    # NEW: Check for invalid coordinates in refreshing map
+    zero_coord_nodes = [n['id'] for n in map_data.get('nodes', []) if n.get('x') == 0 and n.get('y') == 0]
+    if zero_coord_nodes:
+        logger.warning(f"[REFRESH] Found {len(zero_coord_nodes)} nodes with (0,0) coordinates: {zero_coord_nodes[:5]}...")
+    else:
+        logger.info(f"[REFRESH] All nodes have non-zero coordinates")
+
     pathfinder = PathFinder(map_data)
     if session_manager:
         session_manager.pathfinder = pathfinder
@@ -677,29 +716,37 @@ async def calculate_route(request: RouteRequest):
             end_node_id = request.destination_id
         
         elif request.destination_type == "poi":
-            # Lookup from RAM cache first, fall back to HTTP if not found
+            # 1. Try lookup from RAM cache
             poi = next((p for p in poi_cache if p['id'] == request.destination_id), None)
+            
+            # 2. Fallback: Try with alternative prefix (OSM- vs POI-) if it looks like an OSM ID
+            if not poi:
+                alt_id = None
+                if request.destination_id.startswith("POI-"):
+                    alt_id = request.destination_id.replace("POI-", "OSM-")
+                elif request.destination_id.startswith("OSM-"):
+                    alt_id = request.destination_id.replace("OSM-", "POI-")
+                
+                if alt_id:
+                    poi = next((p for p in poi_cache if p['id'] == alt_id), None)
+                    if poi:
+                        logger.info(f"[ROUTE] Found POI via alternative ID: {alt_id}")
 
-            if poi is None and request.destination_id.startswith("OSM-"):
-                # OSM POIs are dynamic – still fetched live
+            # 3. Fallback: Fetch directly from Map Service if still missing
+            if not poi:
+                logger.info(f"[ROUTE] POI {request.destination_id} not in cache, fetching from Map Service...")
                 try:
-                    osm_response = await http_client.get(
-                        f"{MAP_SERVICE_URL}/pois/osm", timeout=35.0
-                    )
-                    if osm_response.status_code == 200:
-                        osm_data = osm_response.json()
-                        for osm_poi in osm_data.get("pois", []):
-                            if osm_poi["id"] == request.destination_id:
-                                poi = osm_poi
-                                break
+                    resp = await http_client.get(f"{MAP_SERVICE_URL}/pois/{request.destination_id}", timeout=5.0)
+                    if resp.status_code == 200:
+                        poi = resp.json()
+                        logger.info(f"[ROUTE] Fetched POI {request.destination_id} directly from Map Service")
                 except Exception as e:
-                    logger.warning(f"[ROUTE] Failed to fetch OSM POIs: {e}")
+                    logger.warning(f"[ROUTE] Direct POI fetch failed: {e}")
 
             if not poi:
-                raise HTTPException(status_code=404, detail="POI not found")
+                raise HTTPException(status_code=404, detail=f"POI {request.destination_id} not found")
             
-            # OSM POIs have pre-computed nearest_node_id (snapped to walkable graph)
-            # Use it directly to avoid routing to building center
+            # Use pre-computed nearest_node_id if available, else snap it
             if poi.get('nearest_node_id') and poi['nearest_node_id'] in pathfinder.nodes:
                 end_node_id = poi['nearest_node_id']
                 logger.info(f"[ROUTE] Using pre-computed nearest_node_id: {end_node_id}")
@@ -708,7 +755,7 @@ async def calculate_route(request: RouteRequest):
                     poi['x'], poi['y'], poi.get('level', 0)
                 )
             
-            # Get queue wait time for this POI from the MQTT cache (populated by WaitTime Service)
+            # Get queue wait time for this POI from the MQTT cache
             wait_time = waittime_cache.get(request.destination_id, 0)
         
         elif request.destination_type in ["seat", "gate"]:
@@ -862,7 +909,8 @@ async def calculate_route(request: RouteRequest):
         return RouteResponse(
             path=path_nodes,
             total_distance=cumulative_distance,
-            estimated_time=cumulative_distance / 1.4 + (wait_time or 0) * 60,
+            # Keep estimated_time as walking-only ETA; wait_time is returned separately.
+            estimated_time=cumulative_distance / 1.4,
             congestion_level=avg_congestion,
             wait_time=wait_time,
             warnings=["High congestion"] if avg_congestion > 0.7 else [],
