@@ -635,16 +635,30 @@ async def refresh_map():
         await _refresh_all_caches()
         return {"status": "success", "nodes": len(pathfinder.nodes), "pois": len(poi_cache)}
     except Exception as e:
-        logger.error(f"[API] Failed to refresh map: {e}")
+        logger.exception(f"[API] Failed to refresh map: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 async def _refresh_all_caches():
     """Re-fetch map, POIs and congestion into RAM."""
     global pathfinder, session_manager
-    client = http_client or httpx.AsyncClient(timeout=10.0)
-    # Refresh map graph
-    map_data = await PathFinder.fetch_map_data(client, MAP_SERVICE_URL)
+    client = http_client or httpx.AsyncClient(timeout=60.0)
+    # Refresh map graph (with retries, uploads may take a few seconds to settle)
+    map_data = None
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            map_data = await PathFinder.fetch_map_data(client, MAP_SERVICE_URL)
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"[REFRESH] Attempt {attempt}/3 failed fetching map from {MAP_SERVICE_URL}: {repr(e)}"
+            )
+            await asyncio.sleep(2)
+
+    if map_data is None:
+        raise RuntimeError(f"Failed to fetch map data after retries: {repr(last_error)}")
     
     # NEW: Check for invalid coordinates in refreshing map
     zero_coord_nodes = [n['id'] for n in map_data.get('nodes', []) if n.get('x') == 0 and n.get('y') == 0]
@@ -895,7 +909,8 @@ async def calculate_route(request: RouteRequest):
         return RouteResponse(
             path=path_nodes,
             total_distance=cumulative_distance,
-            estimated_time=cumulative_distance / 1.4 + (wait_time or 0) * 60,
+            # Keep estimated_time as walking-only ETA; wait_time is returned separately.
+            estimated_time=cumulative_distance / 1.4,
             congestion_level=avg_congestion,
             wait_time=wait_time,
             warnings=["High congestion"] if avg_congestion > 0.7 else [],
