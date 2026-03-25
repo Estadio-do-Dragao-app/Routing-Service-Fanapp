@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MAP_SERVICE_URL = os.getenv("MAP_SERVICE_URL", "http://localhost:8000")
-CONGESTION_SERVICE_URL = os.getenv("CONGESTION_SERVICE_URL", "http://localhost:8001")
+CONGESTION_SERVICE_URL = os.getenv("CONGESTION_SERVICE_URL", "http://localhost:8004")
 CLIENT_BROKER = os.getenv("CLIENT_BROKER", "localhost")
 CLIENT_PORT = int(os.getenv("CLIENT_PORT", 1884))
 
