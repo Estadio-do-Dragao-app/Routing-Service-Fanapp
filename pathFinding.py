@@ -4,23 +4,20 @@ from typing import Dict, List, Tuple, Optional, Set
 import httpx
 
 
-import heapq
-import math
-from typing import Dict, List, Tuple, Optional, Set
-import httpx
-
-
 class PathFinder:
     def __init__(self, map_data: dict):
         """
         Initialize with static map data.
         Builds internal structures for fast lookups.
         """
-        # Robust Node Loading
+        # Robust Node Loading (Ignoring nodes with 0,0 coordinates)
         self.nodes = {}
         for n in map_data.get('nodes', []):
             nid = n.get('id', n.get('node_id'))
             if nid:
+                # NEW: Skip nodes with (0,0) as they break routing logic
+                if n.get('x') == 0 and n.get('y') == 0:
+                    continue
                 self.nodes[nid] = n
 
         self.edges = map_data.get('edges', [])
@@ -66,9 +63,20 @@ class PathFinder:
         response.raise_for_status()
         return response.json()
 
-    def calculate_distance(self, x1: float, y1: float, x2: float, y2: float) -> float:
-        """Euclidean distance between two points"""
-        return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+    def calculate_distance(self, x1, y1, x2, y2):
+        """Haversine distance for GPS coordinates (returns meters)"""
+        # x is Longitude, y is Latitude
+        lat1, lon1 = math.radians(y1), math.radians(x1)
+        lat2, lon2 = math.radians(y2), math.radians(x2)
+        
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        
+        a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        
+        r = 6371000  # Radius of earth in meters
+        return r * c
     
     def find_nearest_node(self, x: float, y: float, level: int) -> Optional[str]:
         """
@@ -111,10 +119,6 @@ class PathFinder:
         """
         A* pathfinding algorithm with cached map, dynamic congestion,
         and wait time penalties for POIs with queues.
-        
-        Args:
-            waittime_data: Dict mapping POI/node IDs to wait time in minutes
-            blocked_nodes: Set of node/tile IDs blocked by emergency closures
         """
         # Pre-process congestion lookup
         congestion_map = self._get_congestion_map(congestion_data)
@@ -180,10 +184,15 @@ class PathFinder:
 
                 # 3. Check Stairs (Accessibility)
                 if avoid_stairs:
-                    n_from = self.nodes[current]
-                    n_to = self.nodes[neighbor]
-                    # Block usage of stairs for VERTICAL travel
-                    if n_to.get('type') == 'stairs' and n_from['level'] != n_to['level']:
+                    n_from = self.nodes.get(current, {})
+                    n_to = self.nodes.get(neighbor, {})
+                    
+                    # Block usage if both nodes are 'stairs' (the edge between them is the stairs)
+                    is_stairs_edge = (n_from.get('type') == 'stairs' and n_to.get('type') == 'stairs')
+                    # Also block if moving to a stair on a different level
+                    is_vertical_stairs = (n_to.get('type') == 'stairs' and n_from.get('level') != n_to.get('level'))
+                    
+                    if is_stairs_edge or is_vertical_stairs:
                         continue
 
                 # 3. Calculate Weight (including Soft Congestion Penalty)
@@ -193,7 +202,6 @@ class PathFinder:
                     weight *= (1.0 + (congestion_level * 10.0))
                 
                 # 4. Apply Wait Time Penalty for POIs with queues
-                # poi_id == node_id, so we can use neighbor directly
                 if neighbor in waittime_map:
                     wait_minutes = waittime_map[neighbor]
                     # Convert wait time to distance equivalent:
