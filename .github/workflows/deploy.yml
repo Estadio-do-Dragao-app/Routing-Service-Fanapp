@@ -9,6 +9,6 @@ jobs:
       - name: Update Service
         run: |
           cd ~/PEI/Routing-Service-Fanapp
-          git pull origin ${{ github.ref_name }}
+          git pull origin ${{ github.ref_name }} --rebase
           cd ..
           docker compose up -d --build routing-service
