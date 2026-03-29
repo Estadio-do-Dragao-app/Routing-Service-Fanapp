@@ -706,6 +706,7 @@ async def calculate_route(request: RouteRequest):
         )
         
         if not start_node_id:
+            logger.error(f"[ROUTE ERROR-A] No nearby node for start ({request.start.x}, {request.start.y}, level={request.start.level})")
             raise HTTPException(status_code=404, detail="No nearby node found for starting position")
         
         # 3. Get destination node based on type
@@ -744,6 +745,7 @@ async def calculate_route(request: RouteRequest):
                     logger.warning(f"[ROUTE] Direct POI fetch failed: {e}")
 
             if not poi:
+                logger.error(f"[ROUTE ERROR-B] POI not found: {request.destination_id} (cache has {len(poi_cache)} POIs)")
                 raise HTTPException(status_code=404, detail=f"POI {request.destination_id} not found")
             
             # Use pre-computed nearest_node_id if available, else snap it
@@ -762,6 +764,7 @@ async def calculate_route(request: RouteRequest):
             endpoint = f"/{request.destination_type}s/{request.destination_id}"
             response = await http_client.get(f"{MAP_SERVICE_URL}{endpoint}")
             if response.status_code != 200:
+                logger.error(f"[ROUTE ERROR-C] {request.destination_type.title()} not found: {request.destination_id} (Map Service returned {response.status_code})")
                 raise HTTPException(status_code=404, detail=f"{request.destination_type.title()} not found")
             dest = response.json()
             
@@ -776,6 +779,7 @@ async def calculate_route(request: RouteRequest):
             # Filter from RAM cache (no HTTP needed)
             category_pois = [p for p in poi_cache if p['id'].startswith(category + '-')]
             if not category_pois:
+                logger.error(f"[ROUTE ERROR-D] No POIs for category: {category} (cache has {len(poi_cache)} total POIs)")
                 raise HTTPException(status_code=404, detail=f"No POIs found for category {category}")
             
             # Calculate ACTUAL route cost to each POI (travel + congestion + wait)
@@ -814,6 +818,7 @@ async def calculate_route(request: RouteRequest):
                     best_poi_node = poi_node
             
             if not best_poi:
+                logger.error(f"[ROUTE ERROR-E] No accessible POI in category: {category} (found {len(category_pois)} but none reachable)")
                 raise HTTPException(status_code=404, detail=f"No accessible POI found in category {category}")
             
             logger.info(f"[ROUTE] Fastest {category}: {best_poi['id']} total_cost={best_cost:.0f}s (wait={waittime_cache.get(best_poi['id'], 0):.0f}m)")
@@ -827,6 +832,7 @@ async def calculate_route(request: RouteRequest):
             request.destination_id = best_poi['id']
         
         if not end_node_id:
+            logger.error(f"[ROUTE ERROR-F] Destination node not found (destination_type={request.destination_type}, destination_id={request.destination_id})")
             raise HTTPException(status_code=404, detail="Destination node not found")
         
         # 4. Calculate path (Internal logic + Dynamic Congestion + Wait Times)
@@ -841,6 +847,7 @@ async def calculate_route(request: RouteRequest):
         )
         
         if not path_ids:
+            logger.error(f"[ROUTE ERROR-G] No path found: start_node={start_node_id}, end_node={end_node_id}, avoid_stairs={request.avoid_stairs}")
             raise HTTPException(status_code=404, detail="No path found to destination")
         
         # 5. Build response

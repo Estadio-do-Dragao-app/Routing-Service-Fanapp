@@ -2,6 +2,9 @@ import heapq
 import math
 from typing import Dict, List, Tuple, Optional, Set
 import httpx
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PathFinder:
@@ -50,6 +53,122 @@ class PathFinder:
             
             # Store base weight, congestion will be applied dynamically
             self.graph[u].append((v, float(w)))
+
+        # FIX: Conectar componentes desconexos (Map Service gera grafos fragmentados)
+        self._bridge_disconnected_components()
+
+    def _bridge_disconnected_components(self):
+        """
+        CRITICAL FIX: Encontra componentes isolados no grafo e cria pontes seguras.
+        Regras:
+        1. Apenas conecta nós no mesmo piso (level).
+        2. Proíbe o uso de POIs como âncoras de pontes (para não quebrar a lógica do A*).
+        3. Usa uma abordagem de MST para conectar ilhas com o mínimo de arestas extras.
+        """
+        from collections import deque
+        
+        # 1. Encontrar componentes usando BFS (tratando como grafo não-direcionado para conectividade)
+        undirected = {}
+        for u, neighbors in self.graph.items():
+            if u not in undirected: undirected[u] = set()
+            for v, _ in neighbors:
+                if v not in undirected: undirected[v] = set()
+                undirected[u].add(v)
+                undirected[v].add(u)
+
+        visited_global = set()
+        all_components = []
+        
+        for node_id in self.nodes.keys():
+            if node_id in visited_global:
+                continue
+            
+            component = set()
+            queue = deque([node_id])
+            visited_global.add(node_id)
+            component.add(node_id)
+            
+            while queue:
+                current = queue.popleft()
+                for neighbor in undirected.get(current, []):
+                    if neighbor not in visited_global:
+                        visited_global.add(neighbor)
+                        component.add(neighbor)
+                        queue.append(neighbor)
+            
+            all_components.append(component)
+
+        if len(all_components) <= 1:
+            logger.info(f"[GRAPH] Grafo totalmente conectado ({len(self.nodes)} nós)")
+            return
+
+        logger.warning(f"[GRAPH BRIDGE] Encontrados {len(all_components)} componentes isolados. Iniciando bridging...")
+
+        # 2. Agrupar componentes por piso
+        level_to_components = {}
+        for comp in all_components:
+            levels = {self.nodes[nid]['level'] for nid in comp}
+            for lvl in levels:
+                if lvl not in level_to_components:
+                    level_to_components[lvl] = []
+                level_to_components[lvl].append(comp)
+
+        # 3. Para cada piso, criar pontes MST
+        for lvl, comps in level_to_components.items():
+            if len(comps) <= 1:
+                continue
+            
+            # Filtro: Nós válidos para pontes (NÃO POIs e no mesmo nível)
+            comp_valid_nodes = []
+            for comp in comps:
+                valid = [nid for nid in comp if not nid.startswith('POI-') and not nid.startswith('OSM-') and self.nodes[nid]['level'] == lvl]
+                comp_valid_nodes.append(valid)
+
+            potential_bridges = []
+            for i in range(len(comps)):
+                for j in range(i + 1, len(comps)):
+                    if not comp_valid_nodes[i] or not comp_valid_nodes[j]:
+                        continue
+                    
+                    min_dist = float('inf')
+                    best_pair = None
+                    
+                    for nid_i in comp_valid_nodes[i]:
+                        n_i = self.nodes[nid_i]
+                        for nid_j in comp_valid_nodes[j]:
+                            n_j = self.nodes[nid_j]
+                            d = self.calculate_distance(n_i['x'], n_i['y'], n_j['x'], n_j['y'])
+                            if d < min_dist:
+                                min_dist = d
+                                best_pair = (nid_i, nid_j)
+                    
+                    if best_pair and min_dist < 500: 
+                        potential_bridges.append((min_dist, i, j, best_pair))
+
+            # Kruskal para selecionar as melhores pontes
+            potential_bridges.sort()
+            parent = list(range(len(comps)))
+            def find(i):
+                if parent[i] == i: return i
+                parent[i] = find(parent[i])
+                return parent[i]
+            
+            def union(i, j):
+                root_i = find(i)
+                root_j = find(j)
+                if root_i != root_j:
+                    parent[root_i] = root_j
+                    return True
+                return False
+
+            for dist, i, j, (nid_a, nid_b) in potential_bridges:
+                if union(i, j):
+                    if nid_a not in self.graph: self.graph[nid_a] = []
+                    if nid_b not in self.graph: self.graph[nid_b] = []
+                    self.graph[nid_a].append((nid_b, dist))
+                    self.graph[nid_b].append((nid_a, dist))
+                    logger.warning(f"[GRAPH BRIDGE] Piso {lvl}: Conectado {nid_a} <-> {nid_b} ({dist:.1f}m)")
+
 
     @staticmethod
     async def fetch_map_data(client: httpx.AsyncClient, service_url: str):
