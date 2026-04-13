@@ -41,8 +41,8 @@ class PathFinder:
             if eid and eid in closure_edge_ids:
                 continue
             
-            u = edge.get('from', edge.get('source'))
-            v = edge.get('to', edge.get('target'))
+            u = edge.get('from', edge.get('source', edge.get('from_id')))
+            v = edge.get('to', edge.get('target', edge.get('to_id')))
             w = edge.get('w', edge.get('weight', 1.0))
 
             if not u or not v:
