@@ -70,12 +70,21 @@ class MQTTRoutingHandler:
             # Check for expiry_time
             if "expiry_time" in payload and payload["expiry_time"]:
                 try:
-                    expiry = datetime.fromisoformat(payload["expiry_time"])
+                    expiry_str = payload["expiry_time"]
+                    # Handle RFC3339 Z suffix by replacing with +00:00
+                    if expiry_str.endswith('Z'):
+                        expiry_str = expiry_str[:-1] + '+00:00'
+                    expiry = datetime.fromisoformat(expiry_str)
+                    # Ensure expiry is timezone-aware UTC
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    else:
+                        expiry = expiry.astimezone(timezone.utc)
                     if datetime.now(timezone.utc) > expiry:
                         logger.warning(f"[MQTT] Ignored expired message on {topic}")
                         return
-                except ValueError:
-                    logger.warning(f"[MQTT] Invalid expiry_time format on {topic}")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[MQTT] Invalid expiry_time format on {topic}: {e}")
             
             
             if "waittime" in topic:

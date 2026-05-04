@@ -7,6 +7,7 @@ import httpx
 import os
 import asyncio
 import logging
+import secrets
 from dotenv import load_dotenv
 
 from models import RouteRequest, RouteResponse, PathNode, Coordinates
@@ -469,7 +470,7 @@ async def sync_state(client: httpx.AsyncClient):
     # Sync POIs (Both DB and OSM)
     try:
         # 1. Standard POIs from DB
-        headers = {"X-API-Key": "dragao_secret_key_2026"}
+        headers = _get_api_headers()
         resp = await client.get(f"{MAP_SERVICE_URL}/pois", headers=headers, timeout=10.0)
         standard_pois = []
         if resp.status_code == 200:
@@ -497,7 +498,7 @@ async def sync_state(client: httpx.AsyncClient):
 
     # Sync Congestion cells (initial full state)
     try:
-        headers = {"X-API-Key": "dragao_secret_key_2026"}
+        headers = {"X-API-Key": API_KEY}
         resp = await client.get(f"{CONGESTION_SERVICE_URL}/heatmap/stadium/cells", headers=headers, timeout=5.0)
         if resp.status_code == 200:
             cells = resp.json().get("cells", [])
@@ -612,16 +613,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def _get_api_headers() -> dict:
+    """Get standardized API headers with authorization."""
+    return {
+        "X-API-Key": API_KEY,
+        "Content-Type": "application/json"
+    }
+
+
 API_KEY_NAME = "X-API-Key"
-API_KEY = "dragao_secret_key_2026"
+API_KEY = os.getenv("API_KEY", "dragao_secret_key_2026")  # Load from env, fallback for dev
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-async def get_api_key(api_key_header: str = Security(api_key_header)):
-    if api_key_header == API_KEY:
-        return api_key_header
+async def get_api_key(api_key_value: Optional[str] = Security(api_key_header)):
+    if api_key_value and secrets.compare_digest(api_key_value, API_KEY):
+        return api_key_value
     raise HTTPException(
         status_code=401,
-        detail="Acesso não autorizado - API Key inválida ou ausente"
+        detail="Unauthorized access - invalid or missing API key"
     )
 
 
@@ -756,7 +765,7 @@ async def calculate_route(
             if not poi:
                 logger.info(f"[ROUTE] POI {request.destination_id} not in cache, fetching from Map Service...")
                 try:
-                    headers = {"X-API-Key": "dragao_secret_key_2026"}
+                    headers = _get_api_headers()
                     resp = await http_client.get(f"{MAP_SERVICE_URL}/pois/{request.destination_id}", headers=headers, timeout=5.0)
                     if resp.status_code == 200:
                         poi = resp.json()
@@ -782,7 +791,7 @@ async def calculate_route(
         
         elif request.destination_type in ["seat", "gate"]:
             endpoint = f"/{request.destination_type}s/{request.destination_id}"
-            headers = {"X-API-Key": "dragao_secret_key_2026"}
+            headers = _get_api_headers()
             response = await http_client.get(f"{MAP_SERVICE_URL}{endpoint}", headers=headers)
             if response.status_code != 200:
                 logger.error(f"[ROUTE ERROR-C] {request.destination_type.title()} not found: {request.destination_id} (Map Service returned {response.status_code})")
@@ -857,7 +866,7 @@ async def calculate_route(
             raise HTTPException(status_code=404, detail="Destination node not found")
         
         # 4. Find path using A* (LOCAL CALCULATION)
-        route, total_distance = pathfinder.find_path(
+        route, path_cost = pathfinder.find_path(
             start_node_id,
             end_node_id,
             congestion_data,
@@ -871,7 +880,7 @@ async def calculate_route(
             raise HTTPException(status_code=404, detail="No path found between the selected points")
         
         path_ids = route
-        total_cost = total_distance
+        total_cost = path_cost
         
         # 5. Build response
         path_nodes = []
