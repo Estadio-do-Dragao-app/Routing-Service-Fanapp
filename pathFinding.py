@@ -172,13 +172,19 @@ class PathFinder:
 
     @staticmethod
     async def fetch_map_data(client: httpx.AsyncClient, service_url: str):
-        response = await client.get(f"{service_url}/map")
+        import os
+        api_key = os.getenv("API_KEY", "dragao_secret_key_2026")
+        headers = {"X-API-Key": api_key}
+        response = await client.get(f"{service_url}/map", headers=headers)
         response.raise_for_status()
         return response.json()
 
     @staticmethod
     async def fetch_congestion_data(client: httpx.AsyncClient, service_url: str):
-        response = await client.get(f"{service_url}/heatmap/stadium/cells")
+        import os
+        api_key = os.getenv("API_KEY", "dragao_secret_key_2026")
+        headers = {"X-API-Key": api_key}
+        response = await client.get(f"{service_url}/heatmap/stadium/cells", headers=headers)
         response.raise_for_status()
         return response.json()
 
