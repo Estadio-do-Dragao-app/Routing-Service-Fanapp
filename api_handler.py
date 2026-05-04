@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 from contextlib import asynccontextmanager
@@ -434,11 +435,11 @@ def trigger_evacuation_routes(alert_level: int = None):
                     "route": best_route,
                     "cost": best_cost,
                     "destination": best_exit,
-                    "priority": "high",
+                    "priority": "CRITICAL",
                     "replaces_current_route": True
                 }
                 
-                mqtt_handler.publish_route_update(session.session_id, evacuation_update)
+                mqtt_handler.publish_route_update(session.session_id, evacuation_update, priority="CRITICAL", qos=2)
                 logger.info(f"[EMERGENCY] Sent evacuation route to session {session.session_id} -> exit {best_exit}")
             else:
                 logger.warning(f"[EMERGENCY] No evacuation route found for session {session.session_id}")
@@ -468,14 +469,15 @@ async def sync_state(client: httpx.AsyncClient):
     # Sync POIs (Both DB and OSM)
     try:
         # 1. Standard POIs from DB
-        resp = await client.get(f"{MAP_SERVICE_URL}/pois", timeout=10.0)
+        headers = {"X-API-Key": "dragao_secret_key_2026"}
+        resp = await client.get(f"{MAP_SERVICE_URL}/pois", headers=headers, timeout=10.0)
         standard_pois = []
         if resp.status_code == 200:
             standard_pois = resp.json()
             logger.info(f"[INIT] Standard POIs cached: {len(standard_pois)}")
         
         # 2. Dynamic POIs from OSM
-        resp_osm = await client.get(f"{MAP_SERVICE_URL}/pois/osm", timeout=35.0)
+        resp_osm = await client.get(f"{MAP_SERVICE_URL}/pois/osm", headers=headers, timeout=35.0)
         osm_pois = []
         if resp_osm.status_code == 200:
             osm_data = resp_osm.json()
@@ -495,7 +497,8 @@ async def sync_state(client: httpx.AsyncClient):
 
     # Sync Congestion cells (initial full state)
     try:
-        resp = await client.get(f"{CONGESTION_SERVICE_URL}/congestion", timeout=5.0)
+        headers = {"X-API-Key": "dragao_secret_key_2026"}
+        resp = await client.get(f"{CONGESTION_SERVICE_URL}/heatmap/stadium/cells", headers=headers, timeout=5.0)
         if resp.status_code == 200:
             cells = resp.json().get("cells", [])
             for cell in cells:
@@ -609,6 +612,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+API_KEY_NAME = "X-API-Key"
+API_KEY = "dragao_secret_key_2026"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if api_key_header == API_KEY:
+        return api_key_header
+    raise HTTPException(
+        status_code=401,
+        detail="Acesso não autorizado - API Key inválida ou ausente"
+    )
+
+
 
 class AlertRequest(BaseModel):
     alert_type: str
@@ -618,7 +634,10 @@ class AlertRequest(BaseModel):
     level: Optional[int] = 0
 
 @app.post("/api/alerts")
-async def trigger_alert(request: AlertRequest):
+async def trigger_alert(
+    request: AlertRequest,
+    api_key: str = Depends(get_api_key)
+):
     """
     Manually trigger an emergency alert via HTTP
     """
@@ -627,7 +646,7 @@ async def trigger_alert(request: AlertRequest):
     return {"status": "processed", "alert_type": request.alert_type}
 
 @app.post("/api/refresh_map")
-async def refresh_map():
+async def refresh_map(api_key: str = Depends(get_api_key)):
     """Manually trigger a map data refresh from mapservice"""
     global pathfinder, session_manager
     try:
@@ -675,7 +694,10 @@ async def _refresh_all_caches():
     await sync_state(client)
 
 @app.post("/api/route", response_model=RouteResponse)
-async def calculate_route(request: RouteRequest):
+async def calculate_route(
+    request: RouteRequest,
+    api_key: str = Depends(get_api_key)
+):
     """
     Calculate optimal route from user coordinates to destination
     """
@@ -696,9 +718,6 @@ async def calculate_route(request: RouteRequest):
         }
 
         # 2. Find nearest node to user's starting position (LOCAL LOOKUP)
-        logger.info(f"[DEBUG] Calculating route for start {request.start.x}, {request.start.y}, level={request.start.level} type={type(request.start.level)}")
-        logger.info(f"[DEBUG] Pathfinder has {len(pathfinder.nodes)} nodes. First node example: {list(pathfinder.nodes.values())[0] if pathfinder.nodes else 'EMPTY'}")
-        
         start_node_id = pathfinder.find_nearest_node(
             request.start.x, 
             request.start.y, 
@@ -737,7 +756,8 @@ async def calculate_route(request: RouteRequest):
             if not poi:
                 logger.info(f"[ROUTE] POI {request.destination_id} not in cache, fetching from Map Service...")
                 try:
-                    resp = await http_client.get(f"{MAP_SERVICE_URL}/pois/{request.destination_id}", timeout=5.0)
+                    headers = {"X-API-Key": "dragao_secret_key_2026"}
+                    resp = await http_client.get(f"{MAP_SERVICE_URL}/pois/{request.destination_id}", headers=headers, timeout=5.0)
                     if resp.status_code == 200:
                         poi = resp.json()
                         logger.info(f"[ROUTE] Fetched POI {request.destination_id} directly from Map Service")
@@ -762,7 +782,8 @@ async def calculate_route(request: RouteRequest):
         
         elif request.destination_type in ["seat", "gate"]:
             endpoint = f"/{request.destination_type}s/{request.destination_id}"
-            response = await http_client.get(f"{MAP_SERVICE_URL}{endpoint}")
+            headers = {"X-API-Key": "dragao_secret_key_2026"}
+            response = await http_client.get(f"{MAP_SERVICE_URL}{endpoint}", headers=headers)
             if response.status_code != 200:
                 logger.error(f"[ROUTE ERROR-C] {request.destination_type.title()} not found: {request.destination_id} (Map Service returned {response.status_code})")
                 raise HTTPException(status_code=404, detail=f"{request.destination_type.title()} not found")
@@ -835,20 +856,22 @@ async def calculate_route(request: RouteRequest):
             logger.error(f"[ROUTE ERROR-F] Destination node not found (destination_type={request.destination_type}, destination_id={request.destination_id})")
             raise HTTPException(status_code=404, detail="Destination node not found")
         
-        # 4. Calculate path (Internal logic + Dynamic Congestion + Wait Times)
-        # Apply active closures (e.g. fire zones)
-        path_ids, total_cost = pathfinder.find_path(
+        # 4. Find path using A* (LOCAL CALCULATION)
+        route, total_distance = pathfinder.find_path(
             start_node_id,
             end_node_id,
             congestion_data,
             avoid_stairs=request.avoid_stairs,
             waittime_data=waittime_cache,
-            blocked_nodes=active_closures  # Use global active closures
+            blocked_nodes=active_closures
         )
         
-        if not path_ids:
-            logger.error(f"[ROUTE ERROR-G] No path found: start_node={start_node_id}, end_node={end_node_id}, avoid_stairs={request.avoid_stairs}")
-            raise HTTPException(status_code=404, detail="No path found to destination")
+        if not route:
+            logger.error(f"[ROUTE ERROR-E] No path found between {start_node_id} and {end_node_id}")
+            raise HTTPException(status_code=404, detail="No path found between the selected points")
+        
+        path_ids = route
+        total_cost = total_distance
         
         # 5. Build response
         path_nodes = []

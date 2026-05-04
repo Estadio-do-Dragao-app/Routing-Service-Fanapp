@@ -2,6 +2,7 @@ import paho.mqtt.client as mqtt
 import json
 import logging
 from typing import Optional, Callable
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,17 @@ class MQTTRoutingHandler:
             topic = msg.topic
             payload = json.loads(msg.payload.decode())
             
+            # Check for expiry_time
+            if "expiry_time" in payload and payload["expiry_time"]:
+                try:
+                    expiry = datetime.fromisoformat(payload["expiry_time"])
+                    if datetime.now(timezone.utc) > expiry:
+                        logger.warning(f"[MQTT] Ignored expired message on {topic}")
+                        return
+                except ValueError:
+                    logger.warning(f"[MQTT] Invalid expiry_time format on {topic}")
+            
+            
             if "waittime" in topic:
                 # Wait time update from WaitTime-Service
                 poi_id = topic.split("/")[-1]
@@ -112,11 +124,13 @@ class MQTTRoutingHandler:
         except Exception as e:
             logger.error(f"[MQTT] Error processing message: {e}")
     
-    def publish_route_update(self, session_id: str, update_data: dict):
+    def publish_route_update(self, session_id: str, update_data: dict, priority: str = "HIGH", qos: int = 1):
         """Publish route update to specific session"""
         topic = f"stadium/services/routing/{session_id}"
+        if "priority" not in update_data:
+            update_data["priority"] = priority
         payload = json.dumps(update_data)
-        result = self.client_mqtt.publish(topic, payload, qos=1)
+        result = self.client_mqtt.publish(topic, payload, qos=qos)
         
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             logger.info(f"[MQTT] Published route update to topic: {topic}")
