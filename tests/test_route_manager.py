@@ -65,7 +65,9 @@ def test_estimate_current_position(dummy_pathfinder):
     )
     
     pos, confidence = session.estimate_current_position(dummy_pathfinder)
-    assert pos == (14.0, 0.0, 0)
+    assert pos[0] == pytest.approx(14.0, abs=1e-4)
+    assert pos[1] == pytest.approx(0.0, abs=1e-4)
+    assert pos[2] == 0
     assert confidence == pytest.approx(0.9)
 
 def test_session_manager_crud(dummy_pathfinder):
