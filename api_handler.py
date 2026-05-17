@@ -186,7 +186,7 @@ def _find_best_alternative(
     return best_alt, best_route, best_cost_seconds
 
 
-async def _evaluate_session_for_alternative_poi(
+def _evaluate_session_for_alternative_poi(
     session,
     poi_id: str,
     poi_category: str,
@@ -270,7 +270,7 @@ async def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: floa
     if not active_sessions:
         return
         
-    logger.info(f"[REROUTE] Checking {len(active_sessions)} active sessions for POI {poi_id}")
+    logger.info(f"[REROUTE] Checking {len(active_sessions)} active sessions for POI {poi_id} (new wait time: {new_wait_minutes} min)")
     
     poi_category = get_poi_category(poi_id)
     alternatives = await find_alternative_pois(poi_id, poi_category)
@@ -292,7 +292,7 @@ async def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: floa
     }
 
     for session in active_sessions:
-        await _evaluate_session_for_alternative_poi(
+        _evaluate_session_for_alternative_poi(
             session, poi_id, poi_category, alt_with_nodes, congestion_data
         )
 
@@ -388,22 +388,24 @@ def handle_congestion_update(payload: dict):
         asyncio.run_coroutine_threadsafe(handle_congestion_update_async(payload), state.loop)
 
 
+def _estimate_session_node(session) -> Optional[str]:
+    """Estimate snapped node for session (handles GPS decays and checkpoint fallbacks)"""
+    est_pos, confidence = session.estimate_current_position(state.pathfinder)
+    estimated_node = state.pathfinder.find_nearest_node(est_pos[0], est_pos[1], est_pos[2])
+    
+    if not estimated_node or confidence < 0.2:
+        if session.last_checkpoint and session.last_checkpoint.node_id:
+            estimated_node = session.last_checkpoint.node_id
+        else:
+            estimated_node = session.current_waypoint or session.start_node
+            
+    return estimated_node
+
+
 def _calculate_evacuation_for_session(session, exit_nodes: list, congestion_data: dict):
     """Calculate and publish evacuation route for a single active session."""
     try:
-        # Estimate current position
-        est_pos, confidence = session.estimate_current_position(state.pathfinder)
-        
-        # Snap to nearest node for A*
-        estimated_node = state.pathfinder.find_nearest_node(est_pos[0], est_pos[1], est_pos[2])
-        
-        if not estimated_node or confidence < 0.2:
-            # Fallback: find nearest node to their LAST known checkpoint if estimation is low confidence
-            if session.last_checkpoint and session.last_checkpoint.node_id:
-                estimated_node = session.last_checkpoint.node_id
-            else:
-                estimated_node = session.current_waypoint or session.start_node
-        
+        estimated_node = _estimate_session_node(session)
         if not estimated_node:
             return
         

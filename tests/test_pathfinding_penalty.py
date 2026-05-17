@@ -59,7 +59,7 @@ def test_poi_destination_penalty():
     
     # Wait time 1 min = 1 * 60 * 1.4 = 84 penalty
     # Total cost = 100 (dist) + 84 (penalty) = 184
-    path, cost = pf.find_path("START", "POI", {}, waittime_data={"POI": 1})
+    _, cost = pf.find_path("START", "POI", {}, waittime_data={"POI": 1})
     assert cost == pytest.approx(184.0)
 
 if __name__ == "__main__":

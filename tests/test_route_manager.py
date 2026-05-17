@@ -121,7 +121,7 @@ def test_should_reroute(dummy_pathfinder):
     assert suggestion is not None
     assert suggestion["type"] == "reroute_suggestion"
     assert suggestion["new_route"] == ["N1", "N3"]
-    assert suggestion["improvement"]["time_saved_seconds"] == 15.0
+    assert suggestion["improvement"]["time_saved_seconds"] == pytest.approx(15.0)
     
     # If the cost is higher, it should not reroute
     no_suggestion = manager.should_reroute(session, ["N1", "N2", "N3"], 25.0, reason="Longer path")
@@ -146,18 +146,18 @@ def test_route_session_edge_cases(dummy_pathfinder):
     # 3. Checkpoint not in current_route (ValueError fallback)
     cp_invalid = Checkpoint(node_id="INVALID", timestamp=time.time() - 40)
     session.update_checkpoint(cp_invalid)
-    pos, confidence = session.estimate_current_position(dummy_pathfinder)
+    _, confidence = session.estimate_current_position(dummy_pathfinder)
     # 40s since checkpoint -> confidence is 0.7
     assert confidence == pytest.approx(0.7)
     
     # 4. Long time since checkpoint -> confidence 0.5 and 0.3
     cp_invalid.timestamp = time.time() - 70
     _, conf_70 = session.estimate_current_position(dummy_pathfinder)
-    assert conf_70 == 0.5
+    assert conf_70 == pytest.approx(0.5)
     
     cp_invalid.timestamp = time.time() - 100
     _, conf_100 = session.estimate_current_position(dummy_pathfinder)
-    assert conf_100 == 0.3
+    assert conf_100 == pytest.approx(0.3)
 
 
 def test_session_manager_edge_cases(dummy_pathfinder):

@@ -58,11 +58,11 @@ def test_find_nearest_node_fallback():
 @pytest.mark.asyncio
 async def test_fetch_map_data(monkeypatch):
     mock_client = AsyncMock()
-    req = httpx.Request("GET", "http://fake/map")
+    req = httpx.Request("GET", "https://fake/map")
     mock_client.get.return_value = httpx.Response(200, json={"nodes": [], "edges": []}, request=req)
     
     with patch.dict("os.environ", {"API_KEY": "test_key"}):
-        res = await PathFinder.fetch_map_data(mock_client, "http://fake")
+        res = await PathFinder.fetch_map_data(mock_client, "https://fake")
         assert res == {"nodes": [], "edges": []}
 
 def test_pathfinding_variety():
@@ -89,16 +89,16 @@ def test_pathfinding_variety():
     assert cost == float("inf")
     
     # Seat node check: SEAT cannot be traversed if it's not the destination, so going START -> END fails
-    path_normal, cost_normal = pf.find_path("START", "END", {})
+    path_normal, _ = pf.find_path("START", "END", {})
     assert "SEAT" not in path_normal
     
     # Dynamic blocked nodes
-    path_blocked, cost_blocked = pf.find_path("START", "STAIR2", {}, blocked_nodes={"STAIR1"})
+    path_blocked, _ = pf.find_path("START", "STAIR2", {}, blocked_nodes={"STAIR1"})
     assert path_blocked == []
     
     # Hazards (congestion > 2.0)
     congestion_data = {"cells": [{"cell_id": "STAIR1", "congestion_level": 2.5}]}
-    path_hazard, cost_hazard = pf.find_path("START", "STAIR2", congestion_data)
+    path_hazard, _ = pf.find_path("START", "STAIR2", congestion_data)
     assert path_hazard == []
     
     # Soft congestion multiplier
