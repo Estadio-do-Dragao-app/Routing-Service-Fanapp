@@ -1,6 +1,3 @@
-from sqlalchemy import Column, String, Float, Integer, Boolean, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
 from pydantic import BaseModel
 from typing import Optional, List
 

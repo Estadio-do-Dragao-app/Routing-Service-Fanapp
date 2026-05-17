@@ -1,7 +1,7 @@
-# Routing Service with Dynamic Re-routing
+# Event Routing Service with Dynamic Re-routing
 
 ## Overview
-The Routing Service provides optimal pathfinding between stadium locations with real-time dynamic re-routing capabilities. It combines REST API for initial route requests with MQTT for push-based route updates.
+The Event Routing Service provides optimal pathfinding between event locations with real-time dynamic re-routing capabilities.
 
 ## Features
 - **Pathfinding**: Calculate optimal routes using Dijkstra's algorithm with A* heuristic

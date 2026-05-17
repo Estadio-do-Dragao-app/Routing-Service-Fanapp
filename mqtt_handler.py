@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class MQTTRoutingHandler:
     """
     Handles MQTT communication for the Routing Service.
-    - Subscribes to service updates (waittime, congestion) on client broker
+    - Subscribes to service updates (waittime, congestion)
     - Publishes routing updates and receives client heartbeats/waypoints
     """
     
@@ -32,6 +32,7 @@ class MQTTRoutingHandler:
         self.on_heartbeat: Optional[Callable] = None
         self.on_waypoint: Optional[Callable] = None
         self.on_route_cancel: Optional[Callable] = None
+        self.verify_ticket_callback: Optional[Callable] = None
     
     def _on_client_connect(self, client, userdata, flags, rc):
         """Handler for connection to client broker"""
@@ -90,7 +91,7 @@ class MQTTRoutingHandler:
             if "waittime" in topic:
                 # Wait time update from WaitTime-Service
                 poi_id = topic.split("/")[-1]
-                logger.info(f"[MQTT] Received waittime update for POI: {poi_id}")
+                logger.info(f"[MQTT] Received waittime update for POI {poi_id}: {str(payload)[:50]}...")
                 if self.on_waittime_update:
                     self.on_waittime_update(poi_id, payload)
             
@@ -98,33 +99,48 @@ class MQTTRoutingHandler:
                 # Extract ticket_id from topic
                 parts = topic.split("/")
                 ticket_id = parts[2] if len(parts) > 2 else None
-                logger.info(f"[MQTT] Received heartbeat from ticket: {ticket_id}")
+                logger.debug(f"[MQTT] Heartbeat from {ticket_id}")
+                
+                # Validation: Check if ticket is active
+                if self.verify_ticket_callback and not self.verify_ticket_callback(ticket_id):
+                    return
+
                 if self.on_heartbeat and ticket_id:
                     self.on_heartbeat(ticket_id, payload)
             
             elif "/waypoint" in topic:
                 parts = topic.split("/")
                 ticket_id = parts[2] if len(parts) > 2 else None
-                logger.info(f"[MQTT] Received waypoint from ticket: {ticket_id}")
+                logger.info(f"[MQTT] Waypoint from {ticket_id}: node={payload.get('node_id')}")
+                
+                # Validation: Check if ticket is active
+                if self.verify_ticket_callback and not self.verify_ticket_callback(ticket_id):
+                    return
+
                 if self.on_waypoint and ticket_id:
                     self.on_waypoint(ticket_id, payload)
             
             elif "/cancel" in topic:
                 parts = topic.split("/")
                 ticket_id = parts[2] if len(parts) > 2 else None
-                logger.info(f"[MQTT] Received route cancellation from ticket: {ticket_id}")
+                logger.info(f"[MQTT] Route cancellation from ticket: {ticket_id}")
+                
+                # Validation: Check if ticket is active
+                if self.verify_ticket_callback and not self.verify_ticket_callback(ticket_id):
+                    return
+
                 if self.on_route_cancel and ticket_id:
                     self.on_route_cancel(ticket_id, payload)
             
             elif "congestion" in topic:
                 # Congestion update from Congestion-Service
-                logger.debug(f"[MQTT] Received congestion update")
+                logger.debug(f"[MQTT] Congestion update: {len(payload.get('cells', []))} cells")
                 if self.on_congestion_update:
                     self.on_congestion_update(payload)
             
             elif topic == "alerts/broadcast":
                 # Emergency alert from Alert-Service
-                logger.info(f"[MQTT] Received emergency alert: {payload.get('alert_type', 'unknown')}")
+                logger.warning(f"[MQTT] EMERGENCY ALERT: {payload.get('alert_type', 'unknown')} - {payload.get('message', '')}")
                 if self.on_alert:
                     self.on_alert(payload)
         
@@ -151,7 +167,7 @@ class MQTTRoutingHandler:
         try:
             self.client_mqtt.connect(self.client_broker, self.client_port, keepalive=60)
             self.client_mqtt.loop_start()
-            logger.info("Routing Service MQTT Handler started")
+            logger.info("Event Routing Service MQTT Handler started")
         except Exception as e:
             logger.error(f"Failed to start MQTT handler: {e}")
             raise
@@ -160,4 +176,4 @@ class MQTTRoutingHandler:
         """Stop MQTT client"""
         self.client_mqtt.loop_stop()
         self.client_mqtt.disconnect()
-        logger.info("Routing Service MQTT Handler stopped")
+        logger.info("Event Routing Service MQTT Handler stopped")

@@ -13,19 +13,19 @@ VALID_HEADERS = {"X-API-Key": TEST_API_KEY}
 @pytest.fixture(autouse=True)
 def setup_mocks(monkeypatch):
     # Mock pathfinder if not already initialized
-    if api_handler.pathfinder is None:
+    if api_handler.state.pathfinder is None:
         mock_pathfinder = MagicMock()
-        api_handler.pathfinder = mock_pathfinder
+        api_handler.state.pathfinder = mock_pathfinder
     else:
-        mock_pathfinder = api_handler.pathfinder
+        mock_pathfinder = api_handler.state.pathfinder
 
     # Pre-populate POI cache for tests
-    api_handler.poi_cache = [
+    api_handler.state.poi_cache = [
         {"id": "bar-1", "x": 14.0, "y": 0.0, "level": 0}
     ]
 
     # Pre-populate waittime cache
-    api_handler.waittime_cache = {"bar-1": 3.0}
+    api_handler.state.waittime_cache = {"bar-1": 3.0}
 
     # Mock map data
     monkeypatch.setattr(
@@ -37,12 +37,17 @@ def setup_mocks(monkeypatch):
         lambda *args, **kwargs: 14.0
     )
     monkeypatch.setattr(
-        mock_pathfinder, "get_congestion_data",
-        AsyncMock(return_value={"cells": []})
+        mock_pathfinder, "nodes",
+        {
+            "A": {"id": "A", "x": 0.0, "y": 0.0, "level": 0},
+            "B": {"id": "B", "x": 14.0, "y": 0.0, "level": 0}
+        }
     )
+    
+    # Mock find_nearest_node to return a valid node ID
     monkeypatch.setattr(
-        mock_pathfinder, "get_congestion_weight",
-        lambda *_: 1.0
+        mock_pathfinder, "find_nearest_node",
+        MagicMock(return_value="A")
     )
 
     # Fake HTTP client using AsyncMock
@@ -55,7 +60,7 @@ def setup_mocks(monkeypatch):
 
     mock_client = AsyncMock()
     mock_client.get = fake_get
-    monkeypatch.setattr(api_handler, "http_client", mock_client)
+    monkeypatch.setattr(api_handler.state, "http_client", mock_client)
 
     yield
 
@@ -81,7 +86,7 @@ def test_route_poi_success():
 
 
 def test_route_no_path_returns_404(monkeypatch):
-    monkeypatch.setattr(api_handler.pathfinder, "find_path", MagicMock(return_value=([], float("inf"))))
+    monkeypatch.setattr(api_handler.state.pathfinder, "find_path", MagicMock(return_value=([], float("inf"))))
     resp = client.post(
         "/api/route",
         json={
