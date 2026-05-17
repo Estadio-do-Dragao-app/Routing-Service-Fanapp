@@ -644,6 +644,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+
 # Add CORS middleware (allows Flutter web app to make requests)
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
