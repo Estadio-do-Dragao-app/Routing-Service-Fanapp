@@ -1,10 +1,9 @@
 fastapi
+prometheus-fastapi-instrumentator==6.1.0
 uvicorn
 httpx
 python-dotenv
 pydantic
-sqlalchemy
 pytest
 pytest-asyncio
 paho-mqtt==1.6.1
-requests
