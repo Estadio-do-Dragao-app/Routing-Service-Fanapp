@@ -31,7 +31,7 @@ def test_waittime_penalty_impact():
     
     # 1. No wait time: Path through POI is shorter (10+100+100+10 = 220)
     # vs path through C (10+141+141+10 = 302)
-    path, cost = pf.find_path("START", "END", {}, waittime_data={})
+    path, _ = pf.find_path("START", "END", {}, waittime_data={})
     assert "POI" in path
     assert "C" not in path
     

@@ -224,20 +224,12 @@ class PathFinder:
         r = 6371000  # Radius of earth in meters
         return r * c
     
-    def find_nearest_node(self, x: float, y: float, level: int) -> Optional[str]:
-        """
-        Find the nearest node to given coordinates using spatial grid index.
-        O(1) average case, fallback to O(N) only if grid is empty at location.
-        """
-        cell_size = self.grid_cell_size
-        gx = int(x / cell_size)
-        gy = int(y / cell_size)
-        
-        # Check current cell and immediate neighbors (9 cells total)
+    def _search_grid_for_nearest_node(self, x: float, y: float, level: int, gx: int, gy: int) -> tuple:
+        """Search the spatial grid (9 cells) for the nearest node."""
         nearest_node_id = None
         min_dist = float('inf')
-        
         found_in_grid = False
+        
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
                 key = (level, gx + dx, gy + dy)
@@ -249,15 +241,34 @@ class PathFinder:
                         if dist < min_dist:
                             min_dist = dist
                             nearest_node_id = nid
+        return nearest_node_id, min_dist, found_in_grid
+
+    def _search_all_nodes_for_nearest_node(self, x: float, y: float, level: int) -> Optional[str]:
+        """Fallback search across all nodes on the given level."""
+        nearest_node_id = None
+        min_dist = float('inf')
+        for nid, node in self.nodes.items():
+            if node['level'] == level:
+                dist = self.calculate_distance(x, y, node['x'], node['y'])
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_node_id = nid
+        return nearest_node_id
+
+    def find_nearest_node(self, x: float, y: float, level: int) -> Optional[str]:
+        """
+        Find the nearest node to given coordinates using spatial grid index.
+        O(1) average case, fallback to O(N) only if grid is empty at location.
+        """
+        cell_size = self.grid_cell_size
+        gx = int(x / cell_size)
+        gy = int(y / cell_size)
+        
+        nearest_node_id, _, found_in_grid = self._search_grid_for_nearest_node(x, y, level, gx, gy)
         
         # Fallback: if no nodes found in 3x3 grid, search all nodes on this level
         if not found_in_grid or not nearest_node_id:
-            for nid, node in self.nodes.items():
-                if node['level'] == level:
-                    dist = self.calculate_distance(x, y, node['x'], node['y'])
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest_node_id = nid
+            return self._search_all_nodes_for_nearest_node(x, y, level)
                         
         return nearest_node_id
     

@@ -49,7 +49,6 @@ class RouteSession:
         
         # Estimate position based on time elapsed (1.4 m/s walking speed)
         time_elapsed = time.time() - self.start_time
-        distance_traveled = time_elapsed * WALKING_SPEED  # meters
         
         # If we have checkpoints, use them as starting point
         if self.last_checkpoint and self.last_checkpoint.node_id:
@@ -259,6 +258,37 @@ class RouteSessionManager:
         """Get all active sessions"""
         return [s for s in self.sessions.values() if s.is_active and not s.is_stale()]
     
+    def _calculate_remaining_cost(self, session: RouteSession, est_x: float, est_y: float) -> float:
+        """Calculate remaining cost of current route from estimated position."""
+        try:
+            # Find closest node on current route
+            min_idx = 0
+            min_d = float('inf')
+            for i, node_id in enumerate(session.current_route):
+                node = self.pathfinder.nodes.get(node_id)
+                if node:
+                    d = self.pathfinder.calculate_distance(est_x, est_y, node['x'], node['y'])
+                    if d < min_d:
+                        min_d = d
+                        min_idx = i
+            
+            remaining_cost = 0
+            # Sum up remaining segments from that node
+            for i in range(min_idx, len(session.current_route) - 1):
+                n1 = self.pathfinder.nodes.get(session.current_route[i])
+                n2 = self.pathfinder.nodes.get(session.current_route[i + 1])
+                if n1 and n2:
+                    dist = self.pathfinder.calculate_distance(n1['x'], n1['y'], n2['x'], n2['y'])
+                    remaining_cost += dist / WALKING_SPEED
+            
+            # Add distance from user to that first node on route
+            remaining_cost += min_d / WALKING_SPEED
+            return remaining_cost
+            
+        except Exception:
+            logger.exception("Error calculating remaining cost")
+            return session.total_cost  # Fallback to total if error
+
     def should_reroute(
         self,
         session: RouteSession,
@@ -281,37 +311,8 @@ class RouteSessionManager:
         reported_node = self.pathfinder.find_nearest_node(est_pos[0], est_pos[1], est_pos[2])
         
         # Calculate remaining cost of current route from estimated position
-        # We walk along the current route from the estimated position to the end
-        remaining_current_cost = 0
-        est_x, est_y, est_level = est_pos
-        
-        # Snap estimated position to the nearest node on the CURRENT route
-        try:
-            # Find closest node on current route
-            min_idx = 0
-            min_d = float('inf')
-            for i, node_id in enumerate(session.current_route):
-                node = self.pathfinder.nodes.get(node_id)
-                if node:
-                    d = self.pathfinder.calculate_distance(est_x, est_y, node['x'], node['y'])
-                    if d < min_d:
-                        min_d = d
-                        min_idx = i
-            
-            # Sum up remaining segments from that node
-            for i in range(min_idx, len(session.current_route) - 1):
-                n1 = self.pathfinder.nodes.get(session.current_route[i])
-                n2 = self.pathfinder.nodes.get(session.current_route[i + 1])
-                if n1 and n2:
-                    dist = self.pathfinder.calculate_distance(n1['x'], n1['y'], n2['x'], n2['y'])
-                    remaining_current_cost += dist / WALKING_SPEED
-            
-            # Add distance from user to that first node on route
-            remaining_current_cost += min_d / WALKING_SPEED
-            
-        except Exception as e:
-            logger.error(f"Error calculating remaining cost: {e}")
-            remaining_current_cost = session.total_cost # Fallback to total if error
+        est_x, est_y, _ = est_pos
+        remaining_current_cost = self._calculate_remaining_cost(session, est_x, est_y)
         
         # Avoid division by zero
         if remaining_current_cost <= 0:
@@ -351,3 +352,4 @@ class RouteSessionManager:
             return suggestion
         
         return None
+
