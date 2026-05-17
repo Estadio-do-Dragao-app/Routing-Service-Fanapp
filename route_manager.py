@@ -1,9 +1,11 @@
 import time
+import math
 import logging
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathFinding import PathFinder
+from constants import WALKING_SPEED, SESSION_TIMEOUT, HEARTBEAT_TIMEOUT, REROUTE_THRESHOLD_HIGH_CONF, REROUTE_THRESHOLD_MED_CONF, REROUTE_THRESHOLD_LOW_CONF
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +38,8 @@ class RouteSession:
     avoid_stairs: bool = False
     
     # Session configuration
-    SESSION_TIMEOUT: float = 300  # 5 minutes
-    HEARTBEAT_TIMEOUT: float = 120  # 2 minutes
+    SESSION_TIMEOUT: float = SESSION_TIMEOUT
+    HEARTBEAT_TIMEOUT: float = HEARTBEAT_TIMEOUT
     
     @property
     def current_waypoint(self) -> Optional[str]:
@@ -47,7 +49,6 @@ class RouteSession:
         
         # Estimate position based on time elapsed (1.4 m/s walking speed)
         time_elapsed = time.time() - self.start_time
-        distance_traveled = time_elapsed * 1.4  # meters
         
         # If we have checkpoints, use them as starting point
         if self.last_checkpoint and self.last_checkpoint.node_id:
@@ -101,8 +102,8 @@ class RouteSession:
         else:
             confidence = 0.3
         
-        # Estimate distance traveled (assuming 1.4 m/s walking speed)
-        distance_traveled = time_since_checkpoint * 1.4
+        # Estimate distance traveled (assuming WALKING_SPEED walking speed)
+        distance_traveled = time_since_checkpoint * WALKING_SPEED
         
         # Find position along route
         if self.last_checkpoint and self.last_checkpoint.node_id:
@@ -116,7 +117,6 @@ class RouteSession:
         
         # Walk along route until we've covered distance_traveled
         cumulative_dist = 0
-        estimated_node = self.current_route[start_idx]
         
         for i in range(start_idx, len(self.current_route) - 1):
             node1 = pathfinder.nodes.get(self.current_route[i])
@@ -131,12 +131,22 @@ class RouteSession:
             )
             
             if cumulative_dist + segment_dist >= distance_traveled:
-                estimated_node = self.current_route[i + 1]
-                break
+                # Interpolate exact position between node1 and node2
+                remaining_dist = distance_traveled - cumulative_dist
+                ratio = remaining_dist / segment_dist if segment_dist > 0 else 0
+                
+                est_x = node1['x'] + (node2['x'] - node1['x']) * ratio
+                est_y = node1['y'] + (node2['y'] - node1['y']) * ratio
+                # Assume level of node1
+                est_level = node1.get('level', 0)
+                
+                return (est_x, est_y, est_level), confidence
             
             cumulative_dist += segment_dist
         
-        return estimated_node, confidence
+        # If we reached the end
+        last_node = pathfinder.nodes.get(self.current_route[-1], {})
+        return (last_node.get('x', 0), last_node.get('y', 0), last_node.get('level', 0)), confidence
 
 
 class RouteSessionManager:
@@ -248,6 +258,37 @@ class RouteSessionManager:
         """Get all active sessions"""
         return [s for s in self.sessions.values() if s.is_active and not s.is_stale()]
     
+    def _calculate_remaining_cost(self, session: RouteSession, est_x: float, est_y: float) -> float:
+        """Calculate remaining cost of current route from estimated position."""
+        try:
+            # Find closest node on current route
+            min_idx = 0
+            min_d = float('inf')
+            for i, node_id in enumerate(session.current_route):
+                node = self.pathfinder.nodes.get(node_id)
+                if node:
+                    d = self.pathfinder.calculate_distance(est_x, est_y, node['x'], node['y'])
+                    if d < min_d:
+                        min_d = d
+                        min_idx = i
+            
+            remaining_cost = 0
+            # Sum up remaining segments from that node
+            for i in range(min_idx, len(session.current_route) - 1):
+                n1 = self.pathfinder.nodes.get(session.current_route[i])
+                n2 = self.pathfinder.nodes.get(session.current_route[i + 1])
+                if n1 and n2:
+                    dist = self.pathfinder.calculate_distance(n1['x'], n1['y'], n2['x'], n2['y'])
+                    remaining_cost += dist / WALKING_SPEED
+            
+            # Add distance from user to that first node on route
+            remaining_cost += min_d / WALKING_SPEED
+            return remaining_cost
+            
+        except Exception:
+            logger.exception("Error calculating remaining cost")
+            return session.total_cost  # Fallback to total if error
+
     def should_reroute(
         self,
         session: RouteSession,
@@ -263,40 +304,52 @@ class RouteSessionManager:
         if session.is_stale():
             return None
         
-        # Estimate current position and confidence
-        estimated_node, confidence = session.estimate_current_position(self.pathfinder)
+        # Estimate current position and confidence (returns coordinates)
+        est_pos, confidence = session.estimate_current_position(self.pathfinder)
+        
+        # Snap to nearest node for reporting
+        reported_node = self.pathfinder.find_nearest_node(est_pos[0], est_pos[1], est_pos[2])
+        
+        # Calculate remaining cost of current route from estimated position
+        est_x, est_y, _ = est_pos
+        remaining_current_cost = self._calculate_remaining_cost(session, est_x, est_y)
         
         # Avoid division by zero
-        if session.total_cost <= 0:
+        if remaining_current_cost <= 0:
             return None
         
-        # Calculate improvement
-        cost_improvement = (session.total_cost - new_cost) / session.total_cost
+        # Calculate improvement: (remaining_current - new_total_from_here) / remaining_current
+        cost_improvement = (remaining_current_cost - new_cost) / remaining_current_cost
         
         # Adjust threshold based on confidence
         if confidence > 0.7:
-            threshold = 0.25  # 25% improvement needed
+            threshold = REROUTE_THRESHOLD_HIGH_CONF
         elif confidence > 0.4:
-            threshold = 0.40  # 40% improvement needed
+            threshold = REROUTE_THRESHOLD_MED_CONF
         else:
-            threshold = 0.50  # 50% improvement needed (low confidence)
+            threshold = REROUTE_THRESHOLD_LOW_CONF
         
         # Check if improvement is significant enough
-        if cost_improvement > threshold:
-            time_saved = (session.total_cost - new_cost) / 1.4  # Convert to seconds
+        if cost_improvement > threshold and math.isfinite(new_cost):
+            time_saved = session.total_cost - new_cost
             
-            return {
+            # Formulate suggestion with all required fields for Flutter app
+            suggestion = {
                 "type": "reroute_suggestion",
                 "session_id": session.session_id,
                 "reason": reason,
                 "confidence": round(confidence, 2),
-                "current_estimate_node": estimated_node,
+                "current_estimate_node": reported_node,
                 "new_route": new_route,
+                "new_destination": session.end_node, # For congestion, destination stays same
+                "category": getattr(session, 'category', 'Route'),
                 "improvement": {
                     "cost_reduction": round(cost_improvement * 100, 1),
                     "time_saved_seconds": round(time_saved, 0),
-                    "time_saved_display": f"{int(time_saved // 60)}min {int(time_saved % 60)}s"
+                    "time_saved_display": f"{int(time_saved // 60)}min {int(time_saved % 60)}s" if math.isfinite(time_saved) else "N/A"
                 }
             }
+            return suggestion
         
         return None
+

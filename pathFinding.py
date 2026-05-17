@@ -1,8 +1,12 @@
 import heapq
 import math
 from typing import Dict, List, Tuple, Optional, Set
+from collections import deque
 import httpx
 import logging
+import os
+
+from constants import WALKING_SPEED, WAIT_TIME_DISTANCE_PENALTY
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,27 @@ class PathFinder:
 
         # FIX: Conectar componentes desconexos (Map Service gera grafos fragmentados)
         self._bridge_disconnected_components()
+        
+        # OPTIMIZATION: Build spatial grid for faster find_nearest_node lookups
+        self._build_spatial_grid()
+
+    def _build_spatial_grid(self, cell_size: float = 0.0005):
+        """Build a grid-based spatial index for fast nearest-node lookups"""
+        self.grid = {}
+        self.grid_cell_size = cell_size
+        
+        for nid, node in self.nodes.items():
+            lvl = node['level']
+            # Using GPS coordinates, cell_size 0.0005 is ~50m
+            gx = int(node['x'] / cell_size)
+            gy = int(node['y'] / cell_size)
+            
+            key = (lvl, gx, gy)
+            if key not in self.grid:
+                self.grid[key] = []
+            self.grid[key].append(nid)
+        
+        logger.info(f"[GRAPH] Spatial grid built with {len(self.grid)} active cells")
 
     def _bridge_disconnected_components(self):
         """
@@ -65,7 +90,6 @@ class PathFinder:
         2. Proíbe o uso de POIs como âncoras de pontes (para não quebrar a lógica do A*).
         3. Usa uma abordagem de MST para conectar ilhas com o mínimo de arestas extras.
         """
-        from collections import deque
         
         # 1. Encontrar componentes usando BFS (tratando como grafo não-direcionado para conectividade)
         undirected = {}
@@ -113,15 +137,21 @@ class PathFinder:
                     level_to_components[lvl] = []
                 level_to_components[lvl].append(comp)
 
+        # Pre-filter nodes by level and type (cache for speed) - OUTSIDE the component loop
+        level_nodes = {lvl: [nid for nid, node in self.nodes.items() 
+                            if node['level'] == lvl and not nid.startswith(('POI-', 'OSM-'))]
+                       for lvl in level_to_components.keys()}
+
         # 3. Para cada piso, criar pontes MST
         for lvl, comps in level_to_components.items():
             if len(comps) <= 1:
                 continue
             
-            # Filtro: Nós válidos para pontes (NÃO POIs e no mesmo nível)
+            # Filter components to only include nodes on this level
             comp_valid_nodes = []
+            valid_nodes_on_lvl = set(level_nodes.get(lvl, []))
             for comp in comps:
-                valid = [nid for nid in comp if not nid.startswith('POI-') and not nid.startswith('OSM-') and self.nodes[nid]['level'] == lvl]
+                valid = [nid for nid in comp if nid in valid_nodes_on_lvl]
                 comp_valid_nodes.append(valid)
 
             potential_bridges = []
@@ -142,7 +172,7 @@ class PathFinder:
                                 min_dist = d
                                 best_pair = (nid_i, nid_j)
                     
-                    if best_pair and min_dist < 500: 
+                    if best_pair and min_dist < 100: # Reduced from 500m to 100m for realism
                         potential_bridges.append((min_dist, i, j, best_pair))
 
             # Kruskal para selecionar as melhores pontes
@@ -172,21 +202,12 @@ class PathFinder:
 
     @staticmethod
     async def fetch_map_data(client: httpx.AsyncClient, service_url: str):
-        import os
         api_key = os.getenv("API_KEY", "dragao_secret_key_2026")
         headers = {"X-API-Key": api_key}
         response = await client.get(f"{service_url}/map", headers=headers)
         response.raise_for_status()
         return response.json()
 
-    @staticmethod
-    async def fetch_congestion_data(client: httpx.AsyncClient, service_url: str):
-        import os
-        api_key = os.getenv("API_KEY", "dragao_secret_key_2026")
-        headers = {"X-API-Key": api_key}
-        response = await client.get(f"{service_url}/heatmap/stadium/cells", headers=headers)
-        response.raise_for_status()
-        return response.json()
 
     def calculate_distance(self, x1, y1, x2, y2):
         """Haversine distance for GPS coordinates (returns meters)"""
@@ -203,23 +224,52 @@ class PathFinder:
         r = 6371000  # Radius of earth in meters
         return r * c
     
+    def _search_grid_for_nearest_node(self, x: float, y: float, level: int, gx: int, gy: int) -> tuple:
+        """Search the spatial grid (9 cells) for the nearest node."""
+        nearest_node_id = None
+        min_dist = float('inf')
+        found_in_grid = False
+        
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                key = (level, gx + dx, gy + dy)
+                if key in self.grid:
+                    found_in_grid = True
+                    for nid in self.grid[key]:
+                        node = self.nodes[nid]
+                        dist = self.calculate_distance(x, y, node['x'], node['y'])
+                        if dist < min_dist:
+                            min_dist = dist
+                            nearest_node_id = nid
+        return nearest_node_id, min_dist, found_in_grid
+
+    def _search_all_nodes_for_nearest_node(self, x: float, y: float, level: int) -> Optional[str]:
+        """Fallback search across all nodes on the given level."""
+        nearest_node_id = None
+        min_dist = float('inf')
+        for nid, node in self.nodes.items():
+            if node['level'] == level:
+                dist = self.calculate_distance(x, y, node['x'], node['y'])
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_node_id = nid
+        return nearest_node_id
+
     def find_nearest_node(self, x: float, y: float, level: int) -> Optional[str]:
         """
-        Find the nearest node to given coordinates using cached nodes.
-        O(N) lookup - fast enough for <10k nodes.
+        Find the nearest node to given coordinates using spatial grid index.
+        O(1) average case, fallback to O(N) only if grid is empty at location.
         """
-        min_dist = float('inf')
-        nearest_node_id = None
+        cell_size = self.grid_cell_size
+        gx = int(x / cell_size)
+        gy = int(y / cell_size)
         
-        for node_id, node in self.nodes.items():
-            if node['level'] != level:
-                continue
-            
-            dist = self.calculate_distance(x, y, node['x'], node['y'])
-            if dist < min_dist:
-                min_dist = dist
-                nearest_node_id = node_id
+        nearest_node_id, _, found_in_grid = self._search_grid_for_nearest_node(x, y, level, gx, gy)
         
+        # Fallback: if no nodes found in 3x3 grid, search all nodes on this level
+        if not found_in_grid or not nearest_node_id:
+            return self._search_all_nodes_for_nearest_node(x, y, level)
+                        
         return nearest_node_id
     
     def _get_congestion_map(self, congestion_data: dict) -> Dict[str, float]:
@@ -320,20 +370,24 @@ class PathFinder:
                     if is_stairs_edge or is_vertical_stairs:
                         continue
 
-                # 3. Calculate Weight (including Soft Congestion Penalty)
+                # 3. Calculate Weight (including Soft Congestion and Wait Time Penalties)
+                # Realistic Flow: Congestion 1.0 (full capacity) results in ~3.5x cost
+                # which approximates speed reduction from 1.4m/s to ~0.4m/s (dense shuffle)
                 weight = base_weight
                 if congestion_level > 0:
-                    # Moderate penalty (4x) - Trade-off between delay and detour
-                    weight *= (1.0 + (congestion_level * 10.0))
+                    weight *= (1.0 + (congestion_level * 2.5))
                 
-                # 4. Apply Wait Time Penalty for POIs with queues
-                if neighbor in waittime_map:
-                    wait_minutes = waittime_map[neighbor]
-                    # Convert wait time to distance equivalent:
-                    # At 1.4 m/s walking speed = 84m per minute
-                    # So 5 min wait ≈ 420m detour would be acceptable
-                    wait_penalty = wait_minutes * 84
-                    weight += wait_penalty
+                # Apply Wait Time Penalty if neighbor is a POI
+                if neighbor_type == 'poi' or neighbor.startswith('POI-'):
+                    wait_minutes = waittime_map.get(neighbor, 0)
+                    # Convert wait time to "equivalent distance" penalty
+                    # 1 minute of waiting = 1 minute * 60s/min * 1.4m/s = 84 meters
+                    # We use a multiplier to discourage passing THROUGH POIs with long queues
+                    penalty_multiplier = 1.0
+                    if neighbor != end_node_id:
+                        penalty_multiplier = 2.0 # Extra penalty for passing through a busy POI
+                    
+                    weight += (wait_minutes * WAIT_TIME_DISTANCE_PENALTY * penalty_multiplier)
                 
                 tentative_g = current_g + weight
                 
