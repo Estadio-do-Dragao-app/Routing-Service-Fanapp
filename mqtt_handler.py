@@ -37,7 +37,7 @@ class MQTTRoutingHandler:
         self.client_port = client_port
         
         # MQTT client
-        self.client_mqtt = mqtt.Client(client_id="routing_service_client")
+        self.client_mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="routing_service_client")
         self.client_mqtt.on_connect = self._on_client_connect
         self.client_mqtt.on_message = self._on_client_message
         self.client_mqtt.on_disconnect = self._on_client_disconnect
@@ -164,9 +164,9 @@ class MQTTRoutingHandler:
                     self.on_alert(payload)
         
         except json.JSONDecodeError as e:
-            logger.error(f"[MQTT] JSON decode error: {e}")
+            logger.exception("[MQTT] JSON decode error")
         except Exception as e:
-            logger.error(f"[MQTT] Error processing message: {e}")
+            logger.exception("[MQTT] Error processing message")
     
     def publish_route_update(self, session_id: str, update_data: dict, priority: str = "HIGH", qos: int = 1):
         """Publish route update to specific session"""
@@ -188,7 +188,7 @@ class MQTTRoutingHandler:
             self.client_mqtt.loop_start()
             logger.info("Event Routing Service MQTT Handler started")
         except Exception as e:
-            logger.error(f"Failed to start MQTT handler: {e}")
+            logger.exception("Failed to start MQTT handler")
             raise
     
     def stop(self):

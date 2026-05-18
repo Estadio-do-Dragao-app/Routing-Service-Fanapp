@@ -7,18 +7,15 @@ WORKDIR /app
 # Copy the requirements file into the container at /app
 COPY requirements.txt .
 
-# Install curl for healthchecks
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-
-# Install any needed packages specified in requirements.txt
-# --no-cache-dir reduces image size
-RUN pip install --no-cache-dir -r requirements.txt
+# Install curl for healthchecks and python dependencies
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --only-binary :all: -r requirements.txt \
+    && adduser --disabled-password --gecos "" appuser \
+    && chown -R appuser:appuser /app
 
 # Copy the rest of the application code
-COPY . .
+COPY *.py ./
 
-# Create non-root user
-RUN adduser --disabled-password --gecos "" appuser && chown -R appuser:appuser /app
 USER appuser
 
 # Expose port 8002 to the outside world
