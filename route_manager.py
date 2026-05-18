@@ -47,9 +47,7 @@ class RouteSession:
         if not self.current_route:
             return self.start_node
         
-        # Estimate position based on time elapsed (1.4 m/s walking speed)
-        time_elapsed = time.time() - self.start_time
-        
+        # Estimate position based on route progress
         # If we have checkpoints, use them as starting point
         if self.last_checkpoint and self.last_checkpoint.node_id:
             if self.last_checkpoint.node_id in self.current_route:
@@ -82,40 +80,7 @@ class RouteSession:
         """Check if client hasn't sent heartbeat recently"""
         return (time.time() - self.last_heartbeat) > self.HEARTBEAT_TIMEOUT
     
-    def estimate_current_position(self, pathfinder: PathFinder) -> Tuple[str, float]:
-        """
-        Estimate current position along route.
-        Returns (estimated_node_id, confidence)
-        """
-        if self.last_checkpoint:
-            time_since_checkpoint = time.time() - self.last_checkpoint.timestamp
-        else:
-            time_since_checkpoint = time.time() - self.start_time
-        
-        # Calculate confidence based on time since last update
-        if time_since_checkpoint < 30:
-            confidence = 0.9
-        elif time_since_checkpoint < 60:
-            confidence = 0.7
-        elif time_since_checkpoint < 90:
-            confidence = 0.5
-        else:
-            confidence = 0.3
-        
-        # Estimate distance traveled (assuming WALKING_SPEED walking speed)
-        distance_traveled = time_since_checkpoint * WALKING_SPEED
-        
-        # Find position along route
-        if self.last_checkpoint and self.last_checkpoint.node_id:
-            # Start from last known checkpoint
-            try:
-                start_idx = self.current_route.index(self.last_checkpoint.node_id)
-            except ValueError:
-                start_idx = 0
-        else:
-            start_idx = 0
-        
-        # Walk along route until we've covered distance_traveled
+    def _find_position_along_route(self, pathfinder: PathFinder, distance_traveled: float, start_idx: int) -> Tuple[float, float, int]:
         cumulative_dist = 0
         
         for i in range(start_idx, len(self.current_route) - 1):
@@ -131,22 +96,47 @@ class RouteSession:
             )
             
             if cumulative_dist + segment_dist >= distance_traveled:
-                # Interpolate exact position between node1 and node2
                 remaining_dist = distance_traveled - cumulative_dist
                 ratio = remaining_dist / segment_dist if segment_dist > 0 else 0
                 
                 est_x = node1['x'] + (node2['x'] - node1['x']) * ratio
                 est_y = node1['y'] + (node2['y'] - node1['y']) * ratio
-                # Assume level of node1
                 est_level = node1.get('level', 0)
                 
-                return (est_x, est_y, est_level), confidence
+                return (est_x, est_y, est_level)
             
             cumulative_dist += segment_dist
-        
-        # If we reached the end
+            
         last_node = pathfinder.nodes.get(self.current_route[-1], {})
-        return (last_node.get('x', 0), last_node.get('y', 0), last_node.get('level', 0)), confidence
+        return (last_node.get('x', 0), last_node.get('y', 0), last_node.get('level', 0))
+
+    def estimate_current_position(self, pathfinder: PathFinder) -> Tuple[str, float]:
+        """
+        Estimate current position along route.
+        Returns (estimated_node_id, confidence)
+        """
+        time_since_checkpoint = time.time() - (self.last_checkpoint.timestamp if self.last_checkpoint else self.start_time)
+        
+        if time_since_checkpoint < 30:
+            confidence = 0.9
+        elif time_since_checkpoint < 60:
+            confidence = 0.7
+        elif time_since_checkpoint < 90:
+            confidence = 0.5
+        else:
+            confidence = 0.3
+        
+        distance_traveled = time_since_checkpoint * WALKING_SPEED
+        
+        start_idx = 0
+        if self.last_checkpoint and self.last_checkpoint.node_id:
+            try:
+                start_idx = self.current_route.index(self.last_checkpoint.node_id)
+            except ValueError:
+                pass
+        
+        return self._find_position_along_route(pathfinder, distance_traveled, start_idx), confidence
+
 
 
 class RouteSessionManager:
@@ -209,7 +199,7 @@ class RouteSessionManager:
             return self.sessions.get(session_id)
         return None
     
-    def handle_heartbeat(self, ticket_id: str, payload: dict):
+    def handle_heartbeat(self, ticket_id: str, _payload: dict):
         """Process heartbeat from client"""
         session = self.get_ticket_session(ticket_id)
         if session and session.is_active:
@@ -228,7 +218,7 @@ class RouteSessionManager:
             )
             session.update_checkpoint(checkpoint)
     
-    def handle_cancellation(self, ticket_id: str, payload: dict):
+    def handle_cancellation(self, ticket_id: str, _payload: dict):
         """Handle route cancellation from client"""
         session = self.get_ticket_session(ticket_id)
         if session:
@@ -239,7 +229,7 @@ class RouteSessionManager:
         """Remove expired and stale sessions. Returns list of expired session IDs."""
         expired = []
         
-        for session_id, session in list(self.sessions.items()):
+        for session_id, session in list(self.sessions.items()): # list is necessary to avoid Runtime Error when modifying dict
             if session.is_expired() or session.is_stale():
                 logger.info(f"Removing expired/stale session: {session_id}")
                 expired.append(session_id)
