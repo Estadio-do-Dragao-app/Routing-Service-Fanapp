@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from typing import Optional, Dict, List, Set
+from typing import Optional, Dict, List, Set, Annotated
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import httpx
@@ -117,7 +117,7 @@ async def find_alternative_pois(poi_id: str, poi_category: str) -> List[dict]:
         return alternatives
             
     except Exception as e:
-        logger.error(f"[REROUTE] Failed to find alternative POIs: {e}")
+        logger.exception("[REROUTE] Failed to find alternative POIs")
         return []
 
 async def handle_waittime_update_async(poi_id: str, payload: dict):
@@ -137,7 +137,7 @@ async def handle_waittime_update_async(poi_id: str, payload: dict):
                 await check_reroutes_for_waittime_change(poi_id, new_wait_minutes)
                 
         except Exception as e:
-            logger.error(f"[WAITTIME] Failed to process update for {poi_id}: {e}")
+            logger.exception("[WAITTIME] Failed to process update for {poi_id}")
 
 def handle_waittime_update(poi_id: str, payload: dict):
     """Thread-safe bridge for MQTT callback"""
@@ -258,7 +258,7 @@ def _evaluate_session_for_alternative_poi(
             logger.info(f"[REROUTE] Suggested alternative {best_alt['id']} for session {session.session_id} (Saved {int(time_saved)}s)")
             
     except Exception as e:
-        logger.error(f"[REROUTE] Failed to check reroute for {session.session_id}: {e}")
+        logger.exception("[REROUTE] Failed to check reroute for {session.session_id}")
 
 
 async def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: float):
@@ -354,7 +354,7 @@ async def check_reroutes_for_congestion_change(cell_id: str):
                     logger.info(f"[REROUTE] Suggested new route for session {session.session_id} due to congestion")
                     
             except Exception as e:
-                logger.error(f"[REROUTE] Failed to check congestion reroute for {session.session_id}: {e}")
+                logger.exception("[REROUTE] Failed to check congestion reroute for {session.session_id}")
 
 async def handle_congestion_update_async(payload: dict):
     """Handle congestion updates (Async for thread safety)"""
@@ -379,7 +379,7 @@ async def handle_congestion_update_async(payload: dict):
                 task.add_done_callback(state.background_tasks.discard)
                 
         except Exception as e:
-            logger.error(f"[CONGESTION] Failed to process update: {e}")
+            logger.exception("[CONGESTION] Failed to process update")
 
 
 def handle_congestion_update(payload: dict):
@@ -445,7 +445,7 @@ def _calculate_evacuation_for_session(session, exit_nodes: list, congestion_data
             state.mqtt_handler.publish_route_update(session.session_id, evacuation_update, priority="CRITICAL", qos=2)
             logger.info(f"[EMERGENCY] Sent evacuation route to session {session.session_id} -> exit {best_exit}")
     except Exception as e:
-        logger.error(f"[EMERGENCY] Failed to calculate evacuation for {session.session_id}: {e}")
+        logger.exception("[EMERGENCY] Failed to calculate evacuation for {session.session_id}")
 
 
 async def trigger_evacuation_routes_async():
@@ -499,7 +499,7 @@ async def resolve_tiles_to_nodes(tile_ids: list) -> set:
         logger.info(f"[EMERGENCY] Resolved tiles via Map-Service: {len(node_ids)} nodes")
         return node_ids
     except Exception as e:
-        logger.error(f"[EMERGENCY] Failed to resolve tiles to nodes: {e}")
+        logger.exception("[EMERGENCY] Failed to resolve tiles to nodes")
         return set()
 
 
@@ -528,7 +528,7 @@ async def handle_emergency_alert_async(payload: dict):
             await trigger_evacuation_routes_async()
             
     except Exception as e:
-        logger.error(f"[EMERGENCY] Failed to process alert: {e}")
+        logger.exception("[EMERGENCY] Failed to process alert")
 
 def handle_emergency_alert(payload: dict):
     """Thread-safe bridge for MQTT callback"""
@@ -606,7 +606,6 @@ async def lifespan(app: FastAPI):
     state.session_manager = RouteSessionManager(state.pathfinder)
     
     # Pre-fetch map data with retries
-    map_loaded = False
     for i in range(10):
         try:
             logger.info(f"[INIT] Fetching map data (Attempt {i+1}/10)")
@@ -614,7 +613,6 @@ async def lifespan(app: FastAPI):
             state.pathfinder = PathFinder(map_data)
             state.session_manager.pathfinder = state.pathfinder
             logger.info(f"[INIT] Map cached: {len(state.pathfinder.nodes)} nodes")
-            map_loaded = True
             break
         except Exception as e:
             logger.warning(f"[INIT] Failed to load map data: {e}")
@@ -686,7 +684,7 @@ def _get_api_headers() -> dict:
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-async def get_api_key(api_key_value: Optional[str] = Security(api_key_header)):
+def get_api_key(api_key_value: Optional[str] = Security(api_key_header)):
     if api_key_value and secrets.compare_digest(api_key_value, API_KEY):
         return api_key_value
     raise HTTPException(
@@ -706,14 +704,14 @@ class AlertRequest(BaseModel):
 @app.post("/api/alerts")
 async def trigger_alert(
     request: AlertRequest,
-    api_key: str = Depends(get_api_key)
+    api_key: Annotated[str, Depends(get_api_key)]
 ):
     """
     Manually trigger an emergency alert via HTTP
     """
-    logger.info(f"[API] Received manual alert trigger: {request.alert_type}")
+    logger.info("[API] Received manual alert trigger")
     await handle_emergency_alert_async(request.dict())
-    return {"status": "processed", "alert_type": request.alert_type}
+    return {"status": "processed"}
 
 @app.post(
     "/api/refresh_map",
@@ -721,7 +719,7 @@ async def trigger_alert(
         500: {"description": "Map refresh failed"}
     }
 )
-async def refresh_map(api_key: str = Depends(get_api_key)):
+async def refresh_map(api_key: Annotated[str, Depends(get_api_key)]):
     """Manually trigger a map data refresh from mapservice"""
     try:
         logger.info("[API] Manual map refresh triggered...")
@@ -767,7 +765,7 @@ async def _refresh_all_caches():
 )
 async def calculate_route(
     request: RouteRequest,
-    api_key: str = Depends(get_api_key)
+    api_key: Annotated[str, Depends(get_api_key)]
 ):
     """
     Calculate optimal route from user coordinates to destination
