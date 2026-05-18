@@ -219,7 +219,7 @@ async def test_handle_waittime_update_flow(monkeypatch):
     api_handler.state.waittime_cache["toilet-1"] = 0.0
     await api_handler.handle_waittime_update_async("toilet-1", {"minutes": 10.0})
     
-    assert api_handler.state.waittime_cache["toilet-1"] == 10.0
+    assert api_handler.state.waittime_cache["toilet-1"] == pytest.approx(10.0)
     mock_check.assert_called_once_with("toilet-1", 10.0)
 
 
@@ -239,7 +239,7 @@ async def test_handle_congestion_update_flow(monkeypatch):
         "congestion_level": 0.8
     })
     
-    assert api_handler.state.congestion_cache["cell_1"] == 0.8
+    assert api_handler.state.congestion_cache["cell_1"] == pytest.approx(0.8)
     # check task scheduled in background_tasks
     assert len(api_handler.state.background_tasks) == 1
 
@@ -342,7 +342,7 @@ async def test_trigger_evacuation_routes_async(monkeypatch):
 async def test_resolve_tiles_to_nodes_success(monkeypatch):
     """Test standard flow for resolving map tile IDs to pathfinder nodes."""
     mock_client = AsyncMock()
-    req = httpx.Request("POST", "http://fake")
+    req = httpx.Request("POST", "https://fake")
     mock_client.post.return_value = httpx.Response(200, json={"node_ids": ["N1", "N2"]}, request=req)
     api_handler.state.http_client = mock_client
     
@@ -354,7 +354,7 @@ async def test_resolve_tiles_to_nodes_success(monkeypatch):
 async def test_process_emergency_closures(monkeypatch):
     """Test process emergency closures and update state closures."""
     mock_client = AsyncMock()
-    req = httpx.Request("POST", "http://fake")
+    req = httpx.Request("POST", "https://fake")
     mock_client.post.return_value = httpx.Response(200, json={"node_ids": ["N10"]}, request=req)
     api_handler.state.http_client = mock_client
     
@@ -383,7 +383,7 @@ async def test_handle_emergency_alert_async(monkeypatch):
 async def test_sync_state(monkeypatch):
     """Test sync_state pulls standard/OSM POIs and Congestion cells into cache."""
     mock_client = AsyncMock()
-    req = httpx.Request("GET", "http://fake")
+    req = httpx.Request("GET", "https://fake")
     resp_pois = httpx.Response(200, json=[{"id": "poi1", "x": 1.0, "y": 2.0, "level": 0}], request=req)
     resp_osm = httpx.Response(200, json={"pois": [{"id": "poi2", "x": 3.0, "y": 4.0, "level": 0}]}, request=req)
     resp_cong = httpx.Response(200, json={"cells": [{"cell_id": "cell1", "congestion_level": 0.5}]}, request=req)
@@ -404,14 +404,14 @@ async def test_sync_state(monkeypatch):
     
     await api_handler.sync_state(mock_client)
     assert len(api_handler.state.poi_cache) == 2
-    assert api_handler.state.congestion_cache["cell1"] == 0.5
+    assert api_handler.state.congestion_cache["cell1"] == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
 async def test_refresh_all_caches_success(monkeypatch):
     """Test manual map and cache refresh pulling from map service."""
     mock_client = AsyncMock()
-    req = httpx.Request("GET", "http://fake")
+    req = httpx.Request("GET", "https://fake")
     
     # Mock PathFinder.fetch_map_data and sync_state
     monkeypatch.setattr(api_handler.PathFinder, "fetch_map_data", AsyncMock(return_value={"nodes": [], "edges": []}))
@@ -457,7 +457,7 @@ def test_calculate_route_nearest_category():
     resp = client.post("/api/route", json=req_payload, headers=VALID_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["wait_time"] == 2.0
+    assert data["wait_time"] == pytest.approx(2.0)
     assert data["session_id"] == "sess-cat"
 
 
@@ -465,7 +465,7 @@ def test_calculate_route_nearest_category():
 async def test_calculate_route_seat_or_gate(monkeypatch):
     """Test routing to a specific seat/gate with client response fallback."""
     mock_client = AsyncMock()
-    req = httpx.Request("GET", "http://fake")
+    req = httpx.Request("GET", "https://fake")
     mock_client.get.return_value = httpx.Response(200, json={"x": 5.0, "y": 5.0, "level": 0}, request=req)
     api_handler.state.http_client = mock_client
     
