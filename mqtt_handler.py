@@ -20,7 +20,7 @@ class MQTTRoutingHandler:
         self.client_port = client_port
         
         # MQTT client
-        self.client_mqtt = mqtt.Client(client_id="routing_service_client")
+        self.client_mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="routing_service_client")
         self.client_mqtt.on_connect = self._on_client_connect
         self.client_mqtt.on_message = self._on_client_message
         self.client_mqtt.on_disconnect = self._on_client_disconnect
