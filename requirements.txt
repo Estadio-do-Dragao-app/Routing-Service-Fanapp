@@ -1,6 +1,6 @@
-fastapi
+fastapi==0.136.1
 prometheus-fastapi-instrumentator==6.1.0
-uvicorn
+uvicorn==0.47.0
 httpx
 python-dotenv
 pydantic

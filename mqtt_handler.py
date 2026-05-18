@@ -1,10 +1,27 @@
 import paho.mqtt.client as mqtt
 import json
 import logging
+import os
+import ssl
 from typing import Optional, Callable
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+_MQTT_USER = os.getenv("MQTT_USER", "services")
+_MQTT_PASS = os.getenv("MQTT_PASS", "dragao_mqtt_2026")
+_MQTT_CA_CERT = os.getenv("MQTT_CA_CERT", "")
+
+
+def _configure_mqtt_tls(client: mqtt.Client) -> None:
+    """Apply credentials and optional TLS to a paho Client."""
+    client.username_pw_set(_MQTT_USER, _MQTT_PASS)
+    if _MQTT_CA_CERT:
+        try:
+            client.tls_set(ca_certs=_MQTT_CA_CERT, tls_version=ssl.PROTOCOL_TLS_CLIENT)
+            client.tls_insecure_set(False)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("[MQTT][TLS] Could not configure TLS: %s", exc)
 
 
 class MQTTRoutingHandler:
@@ -24,6 +41,8 @@ class MQTTRoutingHandler:
         self.client_mqtt.on_connect = self._on_client_connect
         self.client_mqtt.on_message = self._on_client_message
         self.client_mqtt.on_disconnect = self._on_client_disconnect
+        _configure_mqtt_tls(self.client_mqtt)
+
         
         # Callbacks for handling events
         self.on_waittime_update: Optional[Callable] = None

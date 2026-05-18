@@ -17,6 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
+# Create non-root user
+RUN adduser --disabled-password --gecos "" appuser && chown -R appuser:appuser /app
+USER appuser
+
 # Expose port 8002 to the outside world
 EXPOSE 8002
 
