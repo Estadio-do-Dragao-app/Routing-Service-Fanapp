@@ -1,14 +1,15 @@
 name: Deploy to VM
 on:
   push:
-    branches: [ "main", "dev" ]
+    branches: [ "main" ]
 jobs:
   deploy:
     runs-on: self-hosted
     steps:
       - name: Update Service
         run: |
-          cd ~/PEI/Routing-Service-Fanapp
-          git pull origin ${{ github.ref_name }} --rebase
-          cd ..
+          cd ~/PEI/RUA-Backend-Services/Routing-Service-Fanapp
+          git checkout main
+          git pull origin main --rebase
+          cd ~/PEI/RUA-Backend-Services
           docker compose up -d --build routing-service
