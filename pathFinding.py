@@ -52,11 +52,15 @@ class PathFinder:
             if not u or not v:
                 continue
             
+            # Pedestrian edges are bidirectional — add both directions
             if u not in self.graph:
                 self.graph[u] = []
+            if v not in self.graph:
+                self.graph[v] = []
             
-            # Store base weight, congestion will be applied dynamically
             self.graph[u].append((v, float(w)))
+            self.graph[v].append((u, float(w)))
+
 
         # FIX: Conectar componentes desconexos (Map Service gera grafos fragmentados)
         self._bridge_disconnected_components()
