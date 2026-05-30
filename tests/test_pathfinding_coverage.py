@@ -55,6 +55,28 @@ def test_find_nearest_node_fallback():
     node = pf.find_nearest_node(10.0, 10.0, 0)
     assert node == "A1"
 
+
+def test_pathfinder_allows_reverse_traversal():
+    map_data = {
+        "nodes": [
+            {"id": "A", "x": 1.0, "y": 1.0, "level": 0},
+            {"id": "B", "x": 1.0001, "y": 1.0001, "level": 0},
+        ],
+        "edges": [
+            {"from": "A", "to": "B", "w": 10},
+        ]
+    }
+
+    pf = PathFinder(map_data)
+
+    path_forward, cost_forward = pf.find_path("A", "B", {})
+    path_reverse, cost_reverse = pf.find_path("B", "A", {})
+
+    assert path_forward == ["A", "B"]
+    assert path_reverse == ["B", "A"]
+    assert cost_forward == pytest.approx(10.0)
+    assert cost_reverse == pytest.approx(10.0)
+
 @pytest.mark.asyncio
 async def test_fetch_map_data(monkeypatch):
     mock_client = AsyncMock()
