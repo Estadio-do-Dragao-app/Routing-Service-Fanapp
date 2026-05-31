@@ -143,12 +143,19 @@ def test_health():
 def test_refresh_map_success(monkeypatch):
     """Test manual map refresh endpoint with authorized request."""
     monkeypatch.setattr(api_handler, "_refresh_all_caches", AsyncMock())
+
+    dummy_task = MagicMock()
+    dummy_task.add_done_callback = MagicMock()
+    monkeypatch.setattr(api_handler.asyncio, "create_task", MagicMock(return_value=dummy_task))
+
     resp = client.post(
         "/refresh_map",
         headers=VALID_HEADERS
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "success"
+    assert resp.json()["status"] == "accepted"
+    api_handler.asyncio.create_task.assert_called_once()
+    dummy_task.add_done_callback.assert_called_once()
 
 
 def test_refresh_map_unauthorized():
@@ -499,4 +506,4 @@ async def test_calculate_route_seat_or_gate(monkeypatch):
 
 
 
-
+
