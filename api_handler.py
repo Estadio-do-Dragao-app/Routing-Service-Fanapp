@@ -129,7 +129,7 @@ async def handle_waittime_update_async(poi_id: str, payload: dict):
             
             old_wait = state.waittime_cache.get(poi_id, 0)
             state.waittime_cache[poi_id] = new_wait_minutes
-            
+
             # Trigger rerouting check if wait time changed significantly (> 2 min)
             if abs(new_wait_minutes - old_wait) > 2.0 and state.session_manager:
                 logger.info(f"[WAITTIME] Triggering reroute check for {poi_id} (diff={abs(new_wait_minutes - old_wait):.1f} min)")
@@ -701,6 +701,7 @@ class AlertRequest(BaseModel):
     affected_areas: Optional[List[str]] = []
     level: Optional[int] = 0
 
+@app.post("/alerts")
 @app.post("/api/alerts")
 async def trigger_alert(
     request: AlertRequest,
@@ -713,6 +714,12 @@ async def trigger_alert(
     await handle_emergency_alert_async(request.dict())
     return {"status": "processed"}
 
+@app.post(
+    "/refresh_map",
+    responses={
+        500: {"description": "Map refresh failed"}
+    }
+)
 @app.post(
     "/api/refresh_map",
     responses={
@@ -769,6 +776,9 @@ async def _refresh_all_caches():
         logger.info(f"[REFRESH] Map refreshed: {len(state.pathfinder.nodes)} nodes")
         await sync_state(client)
 
+@app.post(
+    "/route",
+)
 @app.post(
     "/api/route",
     response_model=RouteResponse,

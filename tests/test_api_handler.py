@@ -67,7 +67,7 @@ def setup_mocks(monkeypatch):
 
 def test_route_poi_success():
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -88,7 +88,7 @@ def test_route_poi_success():
 def test_route_no_path_returns_404(monkeypatch):
     monkeypatch.setattr(api_handler.state.pathfinder, "find_path", MagicMock(return_value=([], float("inf"))))
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -104,7 +104,7 @@ def test_route_no_path_returns_404(monkeypatch):
 def test_route_unauthorized():
     """Test that requests without API key are rejected."""
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -119,7 +119,7 @@ def test_route_unauthorized():
 def test_route_invalid_api_key():
     """Test that requests with invalid API key are rejected."""
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -149,7 +149,7 @@ def test_refresh_map_success(monkeypatch):
     monkeypatch.setattr(api_handler.asyncio, "create_task", MagicMock(return_value=dummy_task))
 
     resp = client.post(
-        "/api/refresh_map",
+        "/refresh_map",
         headers=VALID_HEADERS
     )
     assert resp.status_code == 200
@@ -160,7 +160,7 @@ def test_refresh_map_success(monkeypatch):
 
 def test_refresh_map_unauthorized():
     """Test manual map refresh endpoint without authentication."""
-    resp = client.post("/api/refresh_map")
+    resp = client.post("/refresh_map")
     assert resp.status_code == 401
 
 
@@ -168,7 +168,7 @@ def test_trigger_alert_success(monkeypatch):
     """Test emergency alert trigger endpoint."""
     monkeypatch.setattr(api_handler, "handle_emergency_alert_async", AsyncMock())
     resp = client.post(
-        "/api/alerts",
+        "/alerts",
         json={
             "alert_type": "FIRE",
             "severity": 5,
@@ -185,7 +185,7 @@ def test_trigger_alert_success(monkeypatch):
 def test_trigger_alert_unauthorized():
     """Test emergency alert trigger endpoint without authentication."""
     resp = client.post(
-        "/api/alerts",
+        "/alerts",
         json={
             "alert_type": "FIRE",
             "severity": 5,
@@ -461,7 +461,7 @@ def test_calculate_route_nearest_category():
         "ticket_id": None
     }
     
-    resp = client.post("/api/route", json=req_payload, headers=VALID_HEADERS)
+    resp = client.post("/route", json=req_payload, headers=VALID_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
     assert data["wait_time"] == pytest.approx(2.0)
@@ -499,7 +499,7 @@ async def test_calculate_route_seat_or_gate(monkeypatch):
         "ticket_id": "t-seat"
     }
     
-    resp = client.post("/api/route", json=req_payload, headers=VALID_HEADERS)
+    resp = client.post("/route", json=req_payload, headers=VALID_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
     assert data["session_id"] == "sess-seat"
