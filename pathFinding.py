@@ -175,7 +175,7 @@ class PathFinder:
                                 min_dist = d
                                 best_pair = (nid_i, nid_j)
                     
-                    if best_pair and min_dist < 30: # Reduced from 500m to 100m for realism
+                    if best_pair and min_dist < 30: # Reduced from 500m to 30m for realism
                         potential_bridges.append((min_dist, i, j, best_pair))
 
             # Kruskal para selecionar as melhores pontes

@@ -724,12 +724,18 @@ async def refresh_map(api_key: Annotated[str, Depends(get_api_key)]):
     try:
         logger.info("[API] Manual map refresh triggered...")
         task = asyncio.create_task(_refresh_all_caches())
+        state.background_tasks.add(task)
 
         def _log_refresh_task_result(done_task: asyncio.Task):
             try:
                 done_task.result()
+                logger.info("[REFRESH] Background refresh task completed")
+            except asyncio.CancelledError:
+                logger.warning("[REFRESH] Background refresh task cancelled")
             except Exception:
                 logger.exception("[REFRESH] Background refresh task failed")
+            finally:
+                state.background_tasks.discard(done_task)
 
         task.add_done_callback(_log_refresh_task_result)
         return {
