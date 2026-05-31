@@ -52,11 +52,14 @@ class PathFinder:
             if not u or not v:
                 continue
             
+            # Pedestrian edges are bidirectional — add both directions
             if u not in self.graph:
                 self.graph[u] = []
+            if v not in self.graph:
+                self.graph[v] = []
             
-            # Store base weight, congestion will be applied dynamically
             self.graph[u].append((v, float(w)))
+            self.graph[v].append((u, float(w)))
 
         # FIX: Conectar componentes desconexos (Map Service gera grafos fragmentados)
         self._bridge_disconnected_components()
@@ -172,7 +175,7 @@ class PathFinder:
                                 min_dist = d
                                 best_pair = (nid_i, nid_j)
                     
-                    if best_pair and min_dist < 100: # Reduced from 500m to 100m for realism
+                    if best_pair and min_dist < 30: # Reduced from 500m to 30m for realism
                         potential_bridges.append((min_dist, i, j, best_pair))
 
             # Kruskal para selecionar as melhores pontes

@@ -27,12 +27,19 @@ def test_pathfinder_initialization_varieties():
     assert "N4" not in pf.graph
 
 def test_bridge_disconnected_components():
+    """
+    Two disconnected islands on the same level.
+    The closest nodes between islands are A2 and B1.
+    Distance A2<->B1 using Haversine with these coords is ~15m, within the 30m threshold.
+    After bridging, B1 should have its original edge (B1-B2) plus the bridge edge (B1-A2).
+    """
     map_data = {
         "nodes": [
-            {"id": "A1", "x": 1.0, "y": 1.0, "level": 0},
-            {"id": "A2", "x": 1.0001, "y": 1.0001, "level": 0},
-            {"id": "B1", "x": 1.0005, "y": 1.0005, "level": 0},
-            {"id": "B2", "x": 1.0006, "y": 1.0006, "level": 0}
+            {"id": "A1", "x": 1.0,      "y": 1.0,      "level": 0},
+            {"id": "A2", "x": 1.0001,   "y": 1.0001,   "level": 0},
+            # B1 is ~15m from A2 (0.00013° diff ≈ 14.5m Haversine), within 30m threshold
+            {"id": "B1", "x": 1.00023,  "y": 1.00023,  "level": 0},
+            {"id": "B2", "x": 1.00033,  "y": 1.00033,  "level": 0}
         ],
         "edges": [
             {"id": "E1", "from": "A1", "to": "A2", "w": 10},
@@ -40,7 +47,8 @@ def test_bridge_disconnected_components():
         ]
     }
     pf = PathFinder(map_data)
-    # The two islands (A1-A2 and B1-B2) are disconnected, but should be bridged because dist is ~60m (<100m)
+    # A bridge edge should have been added between the two islands.
+    # The closest pair is A2<->B1, so B1 should now have 2 neighbors: B2 + A2
     assert len(pf.graph.get("B1", [])) > 1
 
 def test_find_nearest_node_fallback():
@@ -54,6 +62,28 @@ def test_find_nearest_node_fallback():
     # Search far away
     node = pf.find_nearest_node(10.0, 10.0, 0)
     assert node == "A1"
+
+
+def test_pathfinder_allows_reverse_traversal():
+    map_data = {
+        "nodes": [
+            {"id": "A", "x": 1.0, "y": 1.0, "level": 0},
+            {"id": "B", "x": 1.0001, "y": 1.0001, "level": 0},
+        ],
+        "edges": [
+            {"from": "A", "to": "B", "w": 10},
+        ]
+    }
+
+    pf = PathFinder(map_data)
+
+    path_forward, cost_forward = pf.find_path("A", "B", {})
+    path_reverse, cost_reverse = pf.find_path("B", "A", {})
+
+    assert path_forward == ["A", "B"]
+    assert path_reverse == ["B", "A"]
+    assert cost_forward == pytest.approx(10.0)
+    assert cost_reverse == pytest.approx(10.0)
 
 @pytest.mark.asyncio
 async def test_fetch_map_data(monkeypatch):

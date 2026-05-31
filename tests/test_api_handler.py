@@ -67,7 +67,7 @@ def setup_mocks(monkeypatch):
 
 def test_route_poi_success():
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -88,7 +88,7 @@ def test_route_poi_success():
 def test_route_no_path_returns_404(monkeypatch):
     monkeypatch.setattr(api_handler.state.pathfinder, "find_path", MagicMock(return_value=([], float("inf"))))
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -104,7 +104,7 @@ def test_route_no_path_returns_404(monkeypatch):
 def test_route_unauthorized():
     """Test that requests without API key are rejected."""
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -119,7 +119,7 @@ def test_route_unauthorized():
 def test_route_invalid_api_key():
     """Test that requests with invalid API key are rejected."""
     resp = client.post(
-        "/api/route",
+        "/route",
         json={
             "start": {"x": 1.0, "y": 1.0, "level": 0},
             "destination_type": "poi",
@@ -143,17 +143,24 @@ def test_health():
 def test_refresh_map_success(monkeypatch):
     """Test manual map refresh endpoint with authorized request."""
     monkeypatch.setattr(api_handler, "_refresh_all_caches", AsyncMock())
+
+    dummy_task = MagicMock()
+    dummy_task.add_done_callback = MagicMock()
+    monkeypatch.setattr(api_handler.asyncio, "create_task", MagicMock(return_value=dummy_task))
+
     resp = client.post(
-        "/api/refresh_map",
+        "/refresh_map",
         headers=VALID_HEADERS
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "success"
+    assert resp.json()["status"] == "accepted"
+    api_handler.asyncio.create_task.assert_called_once()
+    dummy_task.add_done_callback.assert_called_once()
 
 
 def test_refresh_map_unauthorized():
     """Test manual map refresh endpoint without authentication."""
-    resp = client.post("/api/refresh_map")
+    resp = client.post("/refresh_map")
     assert resp.status_code == 401
 
 
@@ -161,7 +168,7 @@ def test_trigger_alert_success(monkeypatch):
     """Test emergency alert trigger endpoint."""
     monkeypatch.setattr(api_handler, "handle_emergency_alert_async", AsyncMock())
     resp = client.post(
-        "/api/alerts",
+        "/alerts",
         json={
             "alert_type": "FIRE",
             "severity": 5,
@@ -178,7 +185,7 @@ def test_trigger_alert_success(monkeypatch):
 def test_trigger_alert_unauthorized():
     """Test emergency alert trigger endpoint without authentication."""
     resp = client.post(
-        "/api/alerts",
+        "/alerts",
         json={
             "alert_type": "FIRE",
             "severity": 5,
@@ -228,17 +235,20 @@ async def test_handle_congestion_update_flow(monkeypatch):
     """Test handle_congestion_update_async updates cache and schedules task."""
     mock_check = AsyncMock()
     monkeypatch.setattr(api_handler, "check_reroutes_for_congestion_change", mock_check)
-    
+
     mock_session_mgr = MagicMock()
     api_handler.state.session_manager = mock_session_mgr
-    
+
+    # Isolate from any tasks left over by previous tests
+    api_handler.state.background_tasks.clear()
+
     # Significant change (from 0 to 0.8)
     api_handler.state.congestion_cache["cell_1"] = 0.0
     await api_handler.handle_congestion_update_async({
         "cell_id": "cell_1",
         "congestion_level": 0.8
     })
-    
+
     assert api_handler.state.congestion_cache["cell_1"] == pytest.approx(0.8)
     # check task scheduled in background_tasks
     assert len(api_handler.state.background_tasks) == 1
@@ -454,7 +464,7 @@ def test_calculate_route_nearest_category():
         "ticket_id": None
     }
     
-    resp = client.post("/api/route", json=req_payload, headers=VALID_HEADERS)
+    resp = client.post("/route", json=req_payload, headers=VALID_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
     assert data["wait_time"] == pytest.approx(2.0)
@@ -492,11 +502,7 @@ async def test_calculate_route_seat_or_gate(monkeypatch):
         "ticket_id": "t-seat"
     }
     
-    resp = client.post("/api/route", json=req_payload, headers=VALID_HEADERS)
+    resp = client.post("/route", json=req_payload, headers=VALID_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
     assert data["session_id"] == "sess-seat"
-
-
-
-

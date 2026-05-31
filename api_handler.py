@@ -129,7 +129,7 @@ async def handle_waittime_update_async(poi_id: str, payload: dict):
             
             old_wait = state.waittime_cache.get(poi_id, 0)
             state.waittime_cache[poi_id] = new_wait_minutes
-            
+
             # Trigger rerouting check if wait time changed significantly (> 2 min)
             if abs(new_wait_minutes - old_wait) > 2.0 and state.session_manager:
                 logger.info(f"[WAITTIME] Triggering reroute check for {poi_id} (diff={abs(new_wait_minutes - old_wait):.1f} min)")
@@ -701,6 +701,7 @@ class AlertRequest(BaseModel):
     affected_areas: Optional[List[str]] = []
     level: Optional[int] = 0
 
+@app.post("/alerts")
 @app.post("/api/alerts")
 async def trigger_alert(
     request: AlertRequest,
@@ -714,6 +715,12 @@ async def trigger_alert(
     return {"status": "processed"}
 
 @app.post(
+    "/refresh_map",
+    responses={
+        500: {"description": "Map refresh failed"}
+    }
+)
+@app.post(
     "/api/refresh_map",
     responses={
         500: {"description": "Map refresh failed"}
@@ -723,9 +730,24 @@ async def refresh_map(api_key: Annotated[str, Depends(get_api_key)]):
     """Manually trigger a map data refresh from mapservice"""
     try:
         logger.info("[API] Manual map refresh triggered...")
-        await _refresh_all_caches()
+        task = asyncio.create_task(_refresh_all_caches())
+        state.background_tasks.add(task)
+
+        def _log_refresh_task_result(done_task: asyncio.Task):
+            try:
+                done_task.result()
+                logger.info("[REFRESH] Background refresh task completed")
+            except asyncio.CancelledError:
+                logger.warning("[REFRESH] Background refresh task cancelled")
+            except Exception:
+                logger.exception("[REFRESH] Background refresh task failed")
+            finally:
+                state.background_tasks.discard(done_task)
+
+        task.add_done_callback(_log_refresh_task_result)
         return {
-            "status": "success", 
+            "status": "accepted",
+            "message": "Map refresh started",
             "nodes": len(state.pathfinder.nodes) if state.pathfinder else 0, 
             "pois": len(state.poi_cache)
         }
@@ -754,6 +776,9 @@ async def _refresh_all_caches():
         logger.info(f"[REFRESH] Map refreshed: {len(state.pathfinder.nodes)} nodes")
         await sync_state(client)
 
+@app.post(
+    "/route",
+)
 @app.post(
     "/api/route",
     response_model=RouteResponse,
