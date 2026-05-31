@@ -235,17 +235,20 @@ async def test_handle_congestion_update_flow(monkeypatch):
     """Test handle_congestion_update_async updates cache and schedules task."""
     mock_check = AsyncMock()
     monkeypatch.setattr(api_handler, "check_reroutes_for_congestion_change", mock_check)
-    
+
     mock_session_mgr = MagicMock()
     api_handler.state.session_manager = mock_session_mgr
-    
+
+    # Isolate from any tasks left over by previous tests
+    api_handler.state.background_tasks.clear()
+
     # Significant change (from 0 to 0.8)
     api_handler.state.congestion_cache["cell_1"] = 0.0
     await api_handler.handle_congestion_update_async({
         "cell_id": "cell_1",
         "congestion_level": 0.8
     })
-    
+
     assert api_handler.state.congestion_cache["cell_1"] == pytest.approx(0.8)
     # check task scheduled in background_tasks
     assert len(api_handler.state.background_tasks) == 1
@@ -503,7 +506,3 @@ async def test_calculate_route_seat_or_gate(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["session_id"] == "sess-seat"
-
-
-
-
