@@ -126,6 +126,29 @@ async def find_alternative_pois(poi_id: str, poi_category: str) -> List[dict]:
         logger.exception("[REROUTE] Failed to find alternative POIs")
         return []
 
+def _build_congestion_data() -> dict:
+    """Build the congestion data dict from the current cache for pathfinding."""
+    return {
+        "cells": [
+            {"cell_id": cid, "congestion_level": level}
+            for cid, level in state.congestion_cache.items()
+        ]
+    }
+
+
+def _resolve_alt_nodes(alternatives: list) -> list:
+    """Resolve alternative POIs to (alt, node_id) pairs, skipping unresolvable ones."""
+    result = []
+    for alt in alternatives:
+        if alt.get('nearest_node_id') and alt['nearest_node_id'] in state.pathfinder.nodes:
+            alt_node = alt['nearest_node_id']
+        else:
+            alt_node = state.pathfinder.find_nearest_node(alt['x'], alt['y'], alt['level'])
+        if alt_node:
+            result.append((alt, alt_node))
+    return result
+
+
 async def handle_waittime_update_async(poi_id: str, payload: dict):
     """Handle wait time updates (Async for thread safety)"""
     async with state.lock:
@@ -284,21 +307,8 @@ async def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: floa
         logger.info(f"[REROUTE] No alternative POIs found for category {poi_category}")
         return
 
-    alt_with_nodes = []
-    for alt in alternatives:
-        if alt.get('nearest_node_id') and alt['nearest_node_id'] in state.pathfinder.nodes:
-            alt_node = alt['nearest_node_id']
-        else:
-            alt_node = state.pathfinder.find_nearest_node(alt['x'], alt['y'], alt['level'])
-        if alt_node:
-            alt_with_nodes.append((alt, alt_node))
-
-    congestion_data = {
-        "cells": [
-            {"cell_id": cid, "congestion_level": level}
-            for cid, level in state.congestion_cache.items()
-        ]
-    }
+    alt_with_nodes = _resolve_alt_nodes(alternatives)
+    congestion_data = _build_congestion_data()
 
     for session in active_sessions:
         _evaluate_session_for_alternative_poi(
@@ -326,10 +336,7 @@ async def check_reroutes_for_congestion_change(cell_id: str):
             
             try:
                 # Build congestion data for pathfinding from cache
-                congestion_data = {"cells": [
-                    {"cell_id": cid, "congestion_level": level}
-                    for cid, level in state.congestion_cache.items()
-                ]}
+                congestion_data = _build_congestion_data()
                 
                 # Recalculate route from estimated position with current congestion
                 new_route, new_dist = state.pathfinder.find_path(
@@ -484,10 +491,7 @@ async def trigger_evacuation_routes_async():
             return
 
         # Build current congestion data
-        congestion_data = {"cells": [
-            {"cell_id": cid, "congestion_level": level}
-            for cid, level in state.congestion_cache.items()
-        ]}
+        congestion_data = _build_congestion_data()
 
         for session in active_sessions:
             _calculate_evacuation_for_session(session, exit_nodes, congestion_data)
@@ -655,21 +659,8 @@ async def lifespan(app: FastAPI):
             if not alternatives:
                 return
                 
-            alt_with_nodes = []
-            for alt in alternatives:
-                if alt.get('nearest_node_id') and alt['nearest_node_id'] in state.pathfinder.nodes:
-                    alt_node = alt['nearest_node_id']
-                else:
-                    alt_node = state.pathfinder.find_nearest_node(alt['x'], alt['y'], alt['level'])
-                if alt_node:
-                    alt_with_nodes.append((alt, alt_node))
-
-            congestion_data = {
-                "cells": [
-                    {"cell_id": cid, "congestion_level": level}
-                    for cid, level in state.congestion_cache.items()
-                ]
-            }
+            alt_with_nodes = _resolve_alt_nodes(alternatives)
+            congestion_data = _build_congestion_data()
             
             _evaluate_session_for_alternative_poi(
                 session, poi_id, poi_category, alt_with_nodes, congestion_data
@@ -856,12 +847,7 @@ async def calculate_route(
              raise HTTPException(status_code=503, detail="Routing service not initialized")
 
         # 1. Build congestion data from cache
-        congestion_data = {
-            "cells": [
-                {"cell_id": cid, "congestion_level": level}
-                for cid, level in state.congestion_cache.items()
-            ]
-        }
+        congestion_data = _build_congestion_data()
 
         # 2. Find nearest node to start (LOCAL LOOKUP)
         start_node_id = state.pathfinder.find_nearest_node(
