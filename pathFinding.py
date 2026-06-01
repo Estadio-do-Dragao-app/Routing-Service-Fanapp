@@ -369,17 +369,21 @@ class PathFinder:
                 if congestion_level > 2.0: # > 200% congestion = Blocked (Fire/Danger)
                     continue
 
-                # 3. Check Stairs (Accessibility)
+                # 3. Check Stairs / Ramps (Accessibility)
+                n_from = self.nodes.get(current, {})
+                n_to = self.nodes.get(neighbor, {})
+
                 if avoid_stairs:
-                    n_from = self.nodes.get(current, {})
-                    n_to = self.nodes.get(neighbor, {})
-                    
-                    # Block usage if both nodes are 'stairs' (the edge between them is the stairs)
+                    # Accessibility ON: block stairs, allow ramps
                     is_stairs_edge = (n_from.get('type') == 'stairs' and n_to.get('type') == 'stairs')
-                    # Also block if moving to a stair on a different level
                     is_vertical_stairs = (n_to.get('type') == 'stairs' and n_from.get('level') != n_to.get('level'))
-                    
                     if is_stairs_edge or is_vertical_stairs:
+                        continue
+                else:
+                    # Accessibility OFF: block ramps, allow stairs
+                    is_ramp_edge = (n_from.get('type') == 'ramp' and n_to.get('type') == 'ramp')
+                    is_vertical_ramp = (n_to.get('type') == 'ramp' and n_from.get('level') != n_to.get('level'))
+                    if is_ramp_edge or is_vertical_ramp:
                         continue
 
                 # 3. Calculate Weight (including Soft Congestion and Wait Time Penalties)
