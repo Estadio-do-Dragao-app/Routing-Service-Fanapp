@@ -9,5 +9,5 @@ jobs:
       - name: Update Service
         run: |
           cd ~/PEI/RUA-Backend-Services
-          ./pull.sh
+          bash pull.sh
           docker compose up -d --build routing-service
