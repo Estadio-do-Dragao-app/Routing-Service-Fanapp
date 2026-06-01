@@ -55,7 +55,7 @@ state = ServiceState()
 
 
 
-def get_poi_category(poi_id: str) -> str:
+def get_poi_category(poi_id: str) -> Optional[str]:
     """
     Extract category from POI ID or metadata.
     Prioritizes the 'type' field from Map Service if available.
@@ -63,22 +63,26 @@ def get_poi_category(poi_id: str) -> str:
     # Look up POI in cache to find its type
     for poi in state.poi_cache:
         if poi['id'] == poi_id:
-            return poi.get('type', poi.get('category', 'POI'))
+            cat = poi.get('type', poi.get('category'))
+            if cat: return str(cat).lower()
+            break
             
     # Fallback to ID-based detection
     if '-' in poi_id:
-        return poi_id.split('-')[0]
+        return poi_id.split('-')[0].lower()
     if '_' in poi_id:
-        return poi_id.split('_')[0]
-    return 'POI'
+        return poi_id.split('_')[0].lower()
+    return None
 
 
 def _is_poi_match(poi: dict, poi_id: str, poi_category: str) -> bool:
     """Helper to check if a POI matches category/type and is not the original POI"""
     if poi['id'] == poi_id:
         return False
+    if not poi_category or str(poi_category).upper() == 'POI':
+        return False
     p_cat = poi.get('type', poi.get('category'))
-    cat_match = str(p_cat).lower() == str(poi_category).lower()
+    cat_match = p_cat is not None and str(p_cat).lower() == str(poi_category).lower()
     prefix_match = poi['id'].lower().startswith(str(poi_category).lower() + '-')
     return cat_match or prefix_match
 
@@ -95,7 +99,8 @@ async def find_alternative_pois(poi_id: str, poi_category: str) -> List[dict]:
                     'x': poi['x'],
                     'y': poi['y'],
                     'level': poi['level'],
-                    'wait_time': wait_time
+                    'wait_time': wait_time,
+                    'nearest_node_id': poi.get('nearest_node_id')
                 })
         
         # If cache is empty, fallback to API
@@ -110,7 +115,8 @@ async def find_alternative_pois(poi_id: str, poi_category: str) -> List[dict]:
                             'x': poi['x'],
                             'y': poi['y'],
                             'level': poi['level'],
-                            'wait_time': wait_time
+                            'wait_time': wait_time,
+                            'nearest_node_id': poi.get('nearest_node_id')
                         })
         
         alternatives.sort(key=lambda x: x['wait_time'])
@@ -119,6 +125,29 @@ async def find_alternative_pois(poi_id: str, poi_category: str) -> List[dict]:
     except Exception as e:
         logger.exception("[REROUTE] Failed to find alternative POIs")
         return []
+
+def _build_congestion_data() -> dict:
+    """Build the congestion data dict from the current cache for pathfinding."""
+    return {
+        "cells": [
+            {"cell_id": cid, "congestion_level": level}
+            for cid, level in state.congestion_cache.items()
+        ]
+    }
+
+
+def _resolve_alt_nodes(alternatives: list) -> list:
+    """Resolve alternative POIs to (alt, node_id) pairs, skipping unresolvable ones."""
+    result = []
+    for alt in alternatives:
+        if alt.get('nearest_node_id') and alt['nearest_node_id'] in state.pathfinder.nodes:
+            alt_node = alt['nearest_node_id']
+        else:
+            alt_node = state.pathfinder.find_nearest_node(alt['x'], alt['y'], alt['level'])
+        if alt_node:
+            result.append((alt, alt_node))
+    return result
+
 
 async def handle_waittime_update_async(poi_id: str, payload: dict):
     """Handle wait time updates (Async for thread safety)"""
@@ -278,18 +307,8 @@ async def check_reroutes_for_waittime_change(poi_id: str, new_wait_minutes: floa
         logger.info(f"[REROUTE] No alternative POIs found for category {poi_category}")
         return
 
-    alt_with_nodes = []
-    for alt in alternatives:
-        alt_node = state.pathfinder.find_nearest_node(alt['x'], alt['y'], alt['level'])
-        if alt_node:
-            alt_with_nodes.append((alt, alt_node))
-
-    congestion_data = {
-        "cells": [
-            {"cell_id": cid, "congestion_level": level}
-            for cid, level in state.congestion_cache.items()
-        ]
-    }
+    alt_with_nodes = _resolve_alt_nodes(alternatives)
+    congestion_data = _build_congestion_data()
 
     for session in active_sessions:
         _evaluate_session_for_alternative_poi(
@@ -317,10 +336,7 @@ async def check_reroutes_for_congestion_change(cell_id: str):
             
             try:
                 # Build congestion data for pathfinding from cache
-                congestion_data = {"cells": [
-                    {"cell_id": cid, "congestion_level": level}
-                    for cid, level in state.congestion_cache.items()
-                ]}
+                congestion_data = _build_congestion_data()
                 
                 # Recalculate route from estimated position with current congestion
                 new_route, new_dist = state.pathfinder.find_path(
@@ -475,10 +491,7 @@ async def trigger_evacuation_routes_async():
             return
 
         # Build current congestion data
-        congestion_data = {"cells": [
-            {"cell_id": cid, "congestion_level": level}
-            for cid, level in state.congestion_cache.items()
-        ]}
+        congestion_data = _build_congestion_data()
 
         for session in active_sessions:
             _calculate_evacuation_for_session(session, exit_nodes, congestion_data)
@@ -629,7 +642,38 @@ async def lifespan(app: FastAPI):
         )
         
         state.mqtt_handler.on_heartbeat = state.session_manager.handle_heartbeat
-        state.mqtt_handler.on_waypoint = state.session_manager.handle_waypoint
+        
+        async def handle_waypoint_with_reroute_check_async(ticket_id: str, payload: dict):
+            # Process the waypoint
+            state.session_manager.handle_waypoint(ticket_id, payload)
+            
+            # Now trigger a reroute evaluation dynamically
+            session = state.session_manager.get_ticket_session(ticket_id)
+            if not session or not session.is_active or session.destination_type != 'poi':
+                return
+                
+            poi_id = session.destination_id
+            poi_category = session.category or get_poi_category(poi_id)
+            
+            alternatives = await find_alternative_pois(poi_id, poi_category)
+            if not alternatives:
+                return
+                
+            alt_with_nodes = _resolve_alt_nodes(alternatives)
+            congestion_data = _build_congestion_data()
+            
+            _evaluate_session_for_alternative_poi(
+                session, poi_id, poi_category, alt_with_nodes, congestion_data
+            )
+
+        def handle_waypoint_with_reroute_check(ticket_id: str, payload: dict):
+            if state.loop:
+                asyncio.run_coroutine_threadsafe(
+                    handle_waypoint_with_reroute_check_async(ticket_id, payload), 
+                    state.loop
+                )
+                
+        state.mqtt_handler.on_waypoint = handle_waypoint_with_reroute_check
         state.mqtt_handler.on_route_cancel = state.session_manager.handle_cancellation
         state.mqtt_handler.on_waittime_update = handle_waittime_update
         state.mqtt_handler.on_congestion_update = handle_congestion_update
@@ -803,12 +847,7 @@ async def calculate_route(
              raise HTTPException(status_code=503, detail="Routing service not initialized")
 
         # 1. Build congestion data from cache
-        congestion_data = {
-            "cells": [
-                {"cell_id": cid, "congestion_level": level}
-                for cid, level in state.congestion_cache.items()
-            ]
-        }
+        congestion_data = _build_congestion_data()
 
         # 2. Find nearest node to start (LOCAL LOOKUP)
         start_node_id = state.pathfinder.find_nearest_node(
@@ -993,6 +1032,10 @@ async def calculate_route(
         if state.session_manager:
             import uuid
             effective_ticket_id = request.ticket_id or f"anon-{uuid.uuid4().hex[:8]}"
+            
+            # Resolve category for POIs
+            poi_cat = get_poi_category(request.destination_id) if request.destination_type == 'poi' else None
+            
             session = state.session_manager.create_session(
                 ticket_id=effective_ticket_id,
                 start_node=start_node_id,
@@ -1001,7 +1044,8 @@ async def calculate_route(
                 destination_id=request.destination_id,
                 route=path_ids,
                 total_cost=(path_cost / WALKING_SPEED),  # Store travel time in seconds
-                avoid_stairs=request.avoid_stairs
+                avoid_stairs=request.avoid_stairs,
+                category=poi_cat
             )
             session_id = session.session_id
             mqtt_topic = f"stadium/services/routing/{session_id}"
@@ -1015,7 +1059,8 @@ async def calculate_route(
             warnings=["High congestion"] if avg_congestion > 0.7 else [],
             session_id=session_id,
             mqtt_topic=mqtt_topic,
-            waypoints=waypoints
+            waypoints=waypoints,
+            ticket_id=effective_ticket_id if state.session_manager else getattr(request, 'ticket_id', None)
         )
     
     except HTTPException:
