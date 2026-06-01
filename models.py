@@ -33,4 +33,5 @@ class RouteResponse(BaseModel):
     session_id: Optional[str] = None  # For MQTT tracking
     mqtt_topic: Optional[str] = None  # Topic to subscribe for updates
     waypoints: List[str] = []  # Important nodes for position updates
+    ticket_id: Optional[str] = None  # Ticket ID for MQTT heartbeats and waypoints
 

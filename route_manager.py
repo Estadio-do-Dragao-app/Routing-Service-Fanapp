@@ -36,6 +36,7 @@ class RouteSession:
     last_checkpoint: Optional[Checkpoint] = None
     is_active: bool = True
     avoid_stairs: bool = False
+    category: Optional[str] = None
     
     # Session configuration
     SESSION_TIMEOUT: float = SESSION_TIMEOUT
@@ -156,7 +157,8 @@ class RouteSessionManager:
         destination_id: str,
         route: List[str],
         total_cost: float,
-        avoid_stairs: bool = False
+        avoid_stairs: bool = False,
+        category: Optional[str] = None
     ) -> RouteSession:
         """Create a new routing session"""
         session_id = f"route-{ticket_id}-{int(time.time())}"
@@ -179,7 +181,8 @@ class RouteSessionManager:
             total_cost=total_cost,
             start_time=time.time(),
             last_heartbeat=time.time(),
-            avoid_stairs=avoid_stairs
+            avoid_stairs=avoid_stairs,
+            category=category
         )
         
         self.sessions[session_id] = session
@@ -331,8 +334,8 @@ class RouteSessionManager:
                 "confidence": round(confidence, 2),
                 "current_estimate_node": reported_node,
                 "new_route": new_route,
-                "new_destination": session.end_node, # For congestion, destination stays same
-                "category": getattr(session, 'category', 'Route'),
+                "new_destination": session.destination_id, # For congestion, destination stays same
+                "category": session.category or 'Route',
                 "improvement": {
                     "cost_reduction": round(cost_improvement * 100, 1),
                     "time_saved_seconds": round(time_saved, 0),

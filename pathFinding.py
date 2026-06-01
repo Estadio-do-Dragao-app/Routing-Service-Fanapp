@@ -17,13 +17,22 @@ class PathFinder:
         Initialize with static map data.
         Builds internal structures for fast lookups.
         """
-        # Robust Node Loading (Ignoring nodes with 0,0 coordinates)
+        # Robust Node Loading (Ignoring only malformed coordinates)
         self.nodes = {}
         for n in map_data.get('nodes', []):
             nid = n.get('id', n.get('node_id'))
             if nid:
-                # NEW: Skip nodes with (0,0) as they break routing logic
-                if n.get('x') == 0 and n.get('y') == 0:
+                x = n.get('x')
+                y = n.get('y')
+
+                # Accept (0,0) as a valid coordinate; reject only missing or non-finite values.
+                if x is None or y is None:
+                    continue
+
+                if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                    continue
+
+                if not math.isfinite(float(x)) or not math.isfinite(float(y)):
                     continue
                 self.nodes[nid] = n
 
@@ -360,17 +369,21 @@ class PathFinder:
                 if congestion_level > 2.0: # > 200% congestion = Blocked (Fire/Danger)
                     continue
 
-                # 3. Check Stairs (Accessibility)
+                # 3. Check Stairs / Ramps (Accessibility)
+                n_from = self.nodes.get(current, {})
+                n_to = self.nodes.get(neighbor, {})
+
                 if avoid_stairs:
-                    n_from = self.nodes.get(current, {})
-                    n_to = self.nodes.get(neighbor, {})
-                    
-                    # Block usage if both nodes are 'stairs' (the edge between them is the stairs)
+                    # Accessibility ON: block stairs, allow ramps
                     is_stairs_edge = (n_from.get('type') == 'stairs' and n_to.get('type') == 'stairs')
-                    # Also block if moving to a stair on a different level
                     is_vertical_stairs = (n_to.get('type') == 'stairs' and n_from.get('level') != n_to.get('level'))
-                    
                     if is_stairs_edge or is_vertical_stairs:
+                        continue
+                else:
+                    # Accessibility OFF: block ramps, allow stairs
+                    is_ramp_edge = (n_from.get('type') == 'ramp' and n_to.get('type') == 'ramp')
+                    is_vertical_ramp = (n_to.get('type') == 'ramp' and n_from.get('level') != n_to.get('level'))
+                    if is_ramp_edge or is_vertical_ramp:
                         continue
 
                 # 3. Calculate Weight (including Soft Congestion and Wait Time Penalties)
