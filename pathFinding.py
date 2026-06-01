@@ -17,13 +17,22 @@ class PathFinder:
         Initialize with static map data.
         Builds internal structures for fast lookups.
         """
-        # Robust Node Loading (Ignoring nodes with 0,0 coordinates)
+        # Robust Node Loading (Ignoring only malformed coordinates)
         self.nodes = {}
         for n in map_data.get('nodes', []):
             nid = n.get('id', n.get('node_id'))
             if nid:
-                # NEW: Skip nodes with (0,0) as they break routing logic
-                if n.get('x') == 0 and n.get('y') == 0:
+                x = n.get('x')
+                y = n.get('y')
+
+                # Accept (0,0) as a valid coordinate; reject only missing or non-finite values.
+                if x is None or y is None:
+                    continue
+
+                if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                    continue
+
+                if not math.isfinite(float(x)) or not math.isfinite(float(y)):
                     continue
                 self.nodes[nid] = n
 

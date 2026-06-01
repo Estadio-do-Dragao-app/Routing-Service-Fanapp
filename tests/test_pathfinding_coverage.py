@@ -6,10 +6,11 @@ from pathFinding import PathFinder
 def test_pathfinder_initialization_varieties():
     map_data = {
         "nodes": [
-            {"id": "N1", "x": 0.0, "y": 0.0, "level": 0},  # skipped because x=0, y=0
+            {"id": "N1", "x": 0.0, "y": 0.0, "level": 0},  # valid origin node
             {"id": "N2", "x": 1.0, "y": 1.0, "level": 0},
             {"id": "N3", "x": 1.0001, "y": 1.0001, "level": 0},
-            {"id": "N4", "x": 2.0, "y": 2.0, "level": 0}
+            {"id": "N4", "x": 2.0, "y": 2.0, "level": 0},
+            {"id": "BAD", "x": None, "y": 3.0, "level": 0}
         ],
         "edges": [
             {"id": "E1", "from": "N2", "to": "N3", "w": 10},
@@ -21,8 +22,9 @@ def test_pathfinder_initialization_varieties():
         ]
     }
     pf = PathFinder(map_data)
-    assert "N1" not in pf.nodes
+    assert "N1" in pf.nodes
     assert "N2" in pf.nodes
+    assert "BAD" not in pf.nodes
     # E2 is skipped due to static closures, so graph from N3 to N4 won't be connected
     assert "N4" not in pf.graph
 
