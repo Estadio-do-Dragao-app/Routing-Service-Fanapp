@@ -8,8 +8,6 @@ jobs:
     steps:
       - name: Update Service
         run: |
-          cd ~/PEI/RUA-Backend-Services/Routing-Service-Fanapp
-          git checkout main
-          git pull origin main --rebase
           cd ~/PEI/RUA-Backend-Services
+          ./pull.sh
           docker compose up -d --build routing-service
